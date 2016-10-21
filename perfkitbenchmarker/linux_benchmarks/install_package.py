@@ -3,6 +3,7 @@ from perfkitbenchmarker import configs
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import linux_packages
 
+flags.DEFINE_list('packages', [], 'Install packages.')
 BENCHMARK_NAME = 'install_package'
 BENCHMARK_CONFIG = """
 install_package:

@@ -1,5 +1,4 @@
 import logging
-from perfkitbenchmarker import configs
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import linux_packages
 
@@ -20,10 +19,6 @@ install_package:
 
 SKIPPED_PACKAGES = frozenset([
     'wrk_runner', 'ycsb_helium', 'helium', 'mapkeeper'])
-
-
-def GetConfig(user_config):
-  return configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
 
 def Prepare(benchmark_spec):
   """Install all packages.

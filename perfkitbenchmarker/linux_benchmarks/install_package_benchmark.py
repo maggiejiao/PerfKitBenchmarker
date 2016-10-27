@@ -22,7 +22,7 @@ flags.DEFINE_list(
     'data_files', ['cpu2006v1.2.tgz'], 'Data files copied to remote vm.')
 
 
-BENCHMARK_NAME = 'install_package'
+BENCHMARK_NAME = 'install_package0'
 BENCHMARK_CONFIG = """
 install_package:
   description: >

@@ -41,3 +41,21 @@ def Prepare(benchmark_spec):
       vm.Install(package)
     except:
       logging.info('Failed to install %s', package)
+
+def Run(benchmark_spec):
+  """Run benchmark.
+
+  Args:
+    benchmark_spec: The benchmark specification. Contains all data that is
+        required to run the benchmark.
+
+  Returns:
+    A list of sample.Sample instances.
+  """
+  vm = benchmark_spec.vms[0]
+  vm.RemoteCommand('sudo rm /etc/init/mounted-tmp.conf', ignore_failure=True)
+  vm.RemoteCommand('sudo sync')
+  vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /scratch/')
+  vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /scratch1/')
+  vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /root/PerfKitBenchmarker')
+  vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /tmp/pkb')

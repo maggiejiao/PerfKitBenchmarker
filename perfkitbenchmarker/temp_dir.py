@@ -14,7 +14,7 @@
 """Functions related to PerfKit Benchmarker's temporary directory.
 
 PerfKit Benchmarker creates files under a temporary directory (typically in
-/tmp/perfkitbenchmarker or C:\TEMP\perfkitbenchmarker - see tempfile.tempdir for
+/opt/perfkitbenchmarker or C:\TEMP\perfkitbenchmarker - see tempfile.tempdir for
 more information).
 """
 

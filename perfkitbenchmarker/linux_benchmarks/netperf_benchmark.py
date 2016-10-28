@@ -121,13 +121,13 @@ def Prepare(benchmark_spec):
   vms[0].Install('pip')
 
   # Create a scratch directory for the remote test script
-  vms[0].RemoteCommand('sudo mkdir -p /tmp/run/')
-  vms[0].RemoteCommand('sudo chmod 777 /tmp/run/')
+  vms[0].RemoteCommand('sudo mkdir -p /opt/run/')
+  vms[0].RemoteCommand('sudo chmod 777 /opt/run/')
   # Copy remote test script to client
   path = data.ResourcePath(os.path.join(REMOTE_SCRIPTS_DIR, REMOTE_SCRIPT))
   logging.info('Uploading %s to %s', path, vms[0])
-  vms[0].PushFile(path, '/tmp/run/')
-  vms[0].RemoteCommand('sudo chmod 777 /tmp/run/%s' % REMOTE_SCRIPT)
+  vms[0].PushFile(path, '/opt/run/')
+  vms[0].RemoteCommand('sudo chmod 777 /opt/run/%s' % REMOTE_SCRIPT)
 
 
 def _HistogramStatsCalculator(histogram, percentiles=PERCENTILES):
@@ -298,7 +298,7 @@ def RunNetperf(vm, benchmark_name, server_ip, num_streams):
   # Run all of the netperf processes and collect their stdout
   # TODO: Record start times of netperf processes on the remote machine
 
-  remote_script_path = '/tmp/run/%s' % REMOTE_SCRIPT
+  remote_script_path = '/opt/run/%s' % REMOTE_SCRIPT
   remote_cmd = '%s --netperf_cmd="%s" --num_streams=%s --port_start=%s' % \
                (remote_script_path, netperf_cmd, num_streams, PORT_START)
   remote_stdout, _ = vm.RemoteCommand(remote_cmd)
@@ -419,4 +419,4 @@ def Cleanup(benchmark_spec):
   """
   vms = benchmark_spec.vms
   vms[1].RemoteCommand('sudo killall netserver')
-  vms[0].RemoteCommand('rm -rf /tmp/run/')
+  vms[0].RemoteCommand('rm -rf /opt/run/')

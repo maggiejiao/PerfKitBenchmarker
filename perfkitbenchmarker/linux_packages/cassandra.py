@@ -123,7 +123,7 @@ def JujuInstall(vm, vm_group_name):
 
   for unit in vm.units:
     # Make sure the cassandra/conf dir is created, since we're skipping
-    # the manual installation to /tmp/pkb.
+    # the manual installation to /opt/pkb.
     remote_path = posixpath.join(CASSANDRA_DIR, 'conf')
     unit.RemoteCommand('mkdir -p %s' % remote_path)
 

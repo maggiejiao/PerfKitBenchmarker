@@ -215,7 +215,7 @@ MULTISTREAM_DELAY_PER_STREAM = 0.1 * units.second
 # And add a constant factor for PKB-side processing
 MULTISTREAM_DELAY_CONSTANT = 10.0 * units.second
 
-# The multistream write benchmark writes a file in the VM's /tmp with
+# The multistream write benchmark writes a file in the VM's /opt with
 # the objects it has written, which is used by the multistream read
 # benchmark. This is the filename.
 OBJECTS_WRITTEN_FILE = 'pkb-objects-written'
@@ -995,8 +995,8 @@ def CLIThroughputBenchmark(output_results, metadata, vm, command_builder,
     NotEnoughResultsError: if we failed too many times to upload or download.
   """
 
-  data_directory = '/tmp/run/data'
-  download_directory = '/tmp/run/temp'
+  data_directory = '/opt/run/data'
+  download_directory = '/opt/run/temp'
 
   # The real solution to the iteration count issue is dynamically
   # choosing the number of iterations based on how long they
@@ -1010,7 +1010,7 @@ def CLIThroughputBenchmark(output_results, metadata, vm, command_builder,
 
   # The CLI-based tests require some provisioning on the VM first.
   vm.RemoteCommand(
-      'cd /tmp/run/; bash cloud-storage-workload.sh %s' % FLAGS.cli_test_size)
+      'cd /opt/run/; bash cloud-storage-workload.sh %s' % FLAGS.cli_test_size)
 
   # CLI tool based tests.
   cli_upload_results = []
@@ -1088,24 +1088,24 @@ def PrepareVM(vm, service):
 
   # Prepare data on vm, create a run directory in temporary directory, and add
   # permission.
-  vm.RemoteCommand('sudo mkdir -p /tmp/run/')
-  vm.RemoteCommand('sudo chmod 777 /tmp/run/')
+  vm.RemoteCommand('sudo mkdir -p /opt/run/')
+  vm.RemoteCommand('sudo chmod 777 /opt/run/')
 
-  vm.RemoteCommand('sudo mkdir -p /tmp/run/temp/')
-  vm.RemoteCommand('sudo chmod 777 /tmp/run/temp/')
+  vm.RemoteCommand('sudo mkdir -p /opt/run/temp/')
+  vm.RemoteCommand('sudo chmod 777 /opt/run/temp/')
 
   file_path = data.ResourcePath(DATA_FILE)
-  vm.PushFile(file_path, '/tmp/run/')
+  vm.PushFile(file_path, '/opt/run/')
 
   for file_name in API_TEST_SCRIPT_FILES + service.APIScriptFiles():
     path = data.ResourcePath(os.path.join(API_TEST_SCRIPTS_DIR, file_name))
     logging.info('Uploading %s to %s', path, vm)
-    vm.PushFile(path, '/tmp/run/')
+    vm.PushFile(path, '/opt/run/')
 
 
 def CleanupVM(vm):
   vm.RemoteCommand('/usr/bin/yes | sudo pip uninstall python-gflags')
-  vm.RemoteCommand('rm -rf /tmp/run/')
+  vm.RemoteCommand('rm -rf /opt/run/')
   objects_written_file = posixpath.join(vm_util.VM_TMP_DIR,
                                         OBJECTS_WRITTEN_FILE)
   vm.RemoteCommand('rm -f %s' % objects_written_file)
@@ -1194,7 +1194,7 @@ def Run(benchmark_spec):
   metadata.update(service.Metadata(vms[0]))
 
   results = []
-  test_script_path = '/tmp/run/%s' % API_TEST_SCRIPT
+  test_script_path = '/opt/run/%s' % API_TEST_SCRIPT
   try:
     command_builder = APIScriptCommandBuilder(
         test_script_path, STORAGE_TO_API_SCRIPT_DICT[FLAGS.storage], service)

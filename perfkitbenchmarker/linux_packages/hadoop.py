@@ -82,7 +82,7 @@ def _RenderConfig(vm, master_ip, worker_ips, memory_fraction=0.9):
   if vm.scratch_disks:
     scratch_dir = posixpath.join(vm.GetScratchDir(), 'hadoop')
   else:
-    scratch_dir = posixpath.join('/tmp/pkb/local_scratch', 'hadoop')
+    scratch_dir = posixpath.join('/opt/pkb/local_scratch', 'hadoop')
   context = {
       'master_ip': master_ip,
       'worker_ips': worker_ips,

@@ -171,7 +171,7 @@ def ParseResults(ycsb_result_string, data_type='histogram'):
   Example input:
 
     YCSB Client 0.1
-    Command line: -db com.yahoo.ycsb.db.HBaseClient -P /tmp/pkb/workloada
+    Command line: -db com.yahoo.ycsb.db.HBaseClient -P /opt/pkb/workloada
     [OVERALL], RunTime(ms), 1800413.0
     [OVERALL], Throughput(ops/sec), 2740.503428935472
     [UPDATE], Operations, 2468054

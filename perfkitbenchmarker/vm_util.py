@@ -42,7 +42,7 @@ CERT_FILE = 'perfkitbenchmarker.pem'
 # The temporary directory on VMs. We cannot reuse GetTempDir()
 # because run_uri will not be available at time of module load and we need
 # to use this directory as a base for other module level constants.
-VM_TMP_DIR = '/tmp/pkb'
+VM_TMP_DIR = '/opt/pkb'
 
 # Default timeout for issuing a command.
 DEFAULT_TIMEOUT = 300
@@ -99,22 +99,22 @@ flags.DEFINE_enum('background_network_ip_type', IpAddressSubset.EXTERNAL,
 
 
 def GetTempDir():
-  """Returns the tmp dir of the current run."""
+  """Returns the opt dir of the current run."""
   return temp_dir.GetRunDirPath()
 
 
 def PrependTempDir(file_name):
-  """Returns the file name prepended with the tmp dir of the current run."""
+  """Returns the file name prepended with the opt dir of the current run."""
   return os.path.join(GetTempDir(), file_name)
 
 
 def GenTempDir():
-  """Creates the tmp dir for the current run if it does not already exist."""
+  """Creates the opt dir for the current run if it does not already exist."""
   temp_dir.CreateTemporaryDirectories()
 
 
 def SSHKeyGen():
-  """Create PerfKitBenchmarker SSH keys in the tmp dir of the current run."""
+  """Create PerfKitBenchmarker SSH keys in the opt dir of the current run."""
   if not os.path.isdir(GetTempDir()):
     GenTempDir()
 
@@ -430,7 +430,7 @@ def GetLastRunUri():
 
 
 @contextlib.contextmanager
-def NamedTemporaryFile(prefix='tmp', suffix='', dir=None, delete=True):
+def NamedTemporaryFile(prefix='opt', suffix='', dir=None, delete=True):
   """Behaves like tempfile.NamedTemporaryFile.
 
   The existing tempfile.NamedTemporaryFile has the annoying property on

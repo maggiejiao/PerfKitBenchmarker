@@ -53,10 +53,9 @@ def Run(benchmark_spec):
     A list of sample.Sample instances.
   """
   vm = benchmark_spec.vms[0]
-  vm.RemoteCommand('sudo rm /etc/init/mounted-tmp.conf', ignore_failure=True)
   vm.RemoteCommand('sudo sync')
   vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /scratch/')
   vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /scratch1/')
   vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /root/PerfKitBenchmarker')
-  vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /tmp/pkb')
+  vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /opt/pkb')
   return []

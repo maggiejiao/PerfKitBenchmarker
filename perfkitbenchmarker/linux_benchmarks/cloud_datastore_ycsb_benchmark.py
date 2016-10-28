@@ -49,7 +49,7 @@ YCSB_BINDING_TAR_URL = ('https://github.com/brianfrankcooper/YCSB/releases'
                         '/download/0.9.0/'
                         'ycsb-googledatastore-binding-0.9.0.tar.gz')
 YCSB_BINDING_LIB_DIR = posixpath.join(ycsb.YCSB_DIR, 'lib')
-PRIVATE_KEYFILE_DIR = '/tmp/key.p12'
+PRIVATE_KEYFILE_DIR = '/opt/key.p12'
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('google_datastore_keyfile',

@@ -1083,8 +1083,6 @@ def CLIThroughputBenchmark(output_results, metadata, vm, command_builder,
 
 def PrepareVM(vm, service):
   vm.Install('pip')
-  vm.RemoteCommand('sudo pip install python-gflags==2.0')
-  vm.RemoteCommand('sudo pip install pyyaml')
 
   vm.Install('openssl')
 

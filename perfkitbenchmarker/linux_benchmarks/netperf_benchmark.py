@@ -119,7 +119,6 @@ def Prepare(benchmark_spec):
 
   # Install some stuff on the client vm
   vms[0].Install('pip')
-  vms[0].RemoteCommand('sudo pip install python-gflags==2.0')
 
   # Create a scratch directory for the remote test script
   vms[0].RemoteCommand('sudo mkdir -p /tmp/run/')

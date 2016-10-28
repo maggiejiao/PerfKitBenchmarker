@@ -59,3 +59,4 @@ def Run(benchmark_spec):
   vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /scratch1/')
   vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /root/PerfKitBenchmarker')
   vm.RemoteCommand('sudo chmod -R u+rw,g+rw,o+rw /tmp/pkb')
+  return []

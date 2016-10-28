@@ -15,11 +15,11 @@
 
 """Module containing node.js installation and cleanup functions."""
 
-from perfkitbenchmarker.linux_packages import INSTALL_DIR
+from perfkitbenchmarker import vm_util
 
 GIT_REPO = 'https://github.com/joyent/node.git'
 GIT_TAG = 'v0.11.14'
-NODE_DIR = '%s/node' % INSTALL_DIR
+NODE_DIR = '%s/node' % vm_util.VM_TMP_DIR
 
 
 def _Install(vm):

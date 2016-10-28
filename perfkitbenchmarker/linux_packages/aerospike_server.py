@@ -20,13 +20,13 @@ import time
 from perfkitbenchmarker import data
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import flags
-from perfkitbenchmarker.linux_packages import INSTALL_DIR
+from perfkitbenchmarker import vm_util
 
 FLAGS = flags.FLAGS
 
 GIT_REPO = 'https://github.com/aerospike/aerospike-server.git'
 GIT_TAG = '3.7.5'
-AEROSPIKE_DIR = '%s/aerospike-server' % INSTALL_DIR
+AEROSPIKE_DIR = '%s/aerospike-server' % vm_util.VM_TMP_DIR
 AEROSPIKE_CONF_PATH = '%s/as/etc/aerospike_dev.conf' % AEROSPIKE_DIR
 
 MEMORY = 'memory'

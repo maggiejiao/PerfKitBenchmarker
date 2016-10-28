@@ -20,7 +20,7 @@ oltp benchmarks depending on older version of sysbench will break if we
 install 0.5 or later for them. Therefore, it's necessary that we have a
 separate installer here for 0.5 and later.
 """
-from perfkitbenchmarker.linux_packages import INSTALL_DIR
+from perfkitbenchmarker import vm_util
 
 
 def YumInstall(vm):
@@ -31,14 +31,14 @@ def YumInstall(vm):
   vm.RemoteCommand('cd ~ && bzr branch lp:sysbench')
   vm.RemoteCommand(('cd ~/sysbench && ./autogen.sh &&'
                     ' ./configure --prefix=%s --mandir=%s/share/man &&'
-                    ' make') % (INSTALL_DIR, INSTALL_DIR))
+                    ' make') % (vm_util.VM_TMP_DIR, vm_util.VM_TMP_DIR))
   vm.RemoteCommand('cd ~/sysbench && sudo make install')
   vm.RemoteCommand('sudo mkdir %s/share/doc/sysbench/tests/db -p' %
-                   INSTALL_DIR)
+                   vm_util.VM_TMP_DIR)
   vm.RemoteCommand('sudo cp ~/sysbench/sysbench/tests/db/*'
-                   ' %s/share/doc/sysbench/tests/db/' % INSTALL_DIR)
+                   ' %s/share/doc/sysbench/tests/db/' % vm_util.VM_TMP_DIR)
   vm.RemoteCommand('echo "export PATH=$PATH:%s/bin" >> ~/.bashrc && '
-                   'source ~/.bashrc' % INSTALL_DIR)
+                   'source ~/.bashrc' % vm_util.VM_TMP_DIR)
 
   # Cleanup the source code enlisthment from bzr, we don't need it anymore.
   vm.RemoteCommand('cd ~ && rm -fr ./sysbench')

@@ -19,9 +19,9 @@ import time
 
 from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import sample
-from perfkitbenchmarker.linux_packages import INSTALL_DIR
+from perfkitbenchmarker import vm_util
 
-FIO_DIR = '%s/fio' % INSTALL_DIR
+FIO_DIR = '%s/fio' % vm_util.VM_TMP_DIR
 GIT_REPO = 'http://git.kernel.dk/fio.git'
 GIT_TAG = 'fio-2.7'
 FIO_PATH = FIO_DIR + '/fio'

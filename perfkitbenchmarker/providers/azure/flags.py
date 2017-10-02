@@ -25,11 +25,11 @@ flags.DEFINE_enum(
 # Azure Storage Account types. See
 # http://azure.microsoft.com/en-us/pricing/details/storage/ for more information
 # about the different types.
-LRS = 'LRS'
-PLRS = 'PLRS'
-ZRS = 'ZRS'
-GRS = 'GRS'
-RAGRS = 'RAGRS'
+LRS = 'Standard_LRS'
+PLRS = 'Premium_LRS'
+ZRS = 'Standard_ZRS'
+GRS = 'Standard_GRS'
+RAGRS = 'Standard_RAGRS'
 
 STORAGE = 'Storage'
 BLOB_STORAGE = 'BlobStorage'
@@ -49,6 +49,3 @@ flags.DEFINE_enum(
     'The type of storage account to use for blob storage. Choosing Storage '
     'will let you use ZRS storage. Choosing BlobStorage will give you access '
     'to Hot and Cold storage tiers.')
-
-flags.DEFINE_string('azure_lib_version', None,
-                    'Use a particular version of azure client lib, e.g.: 1.0.2')

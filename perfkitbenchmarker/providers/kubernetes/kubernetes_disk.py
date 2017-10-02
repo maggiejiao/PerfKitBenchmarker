@@ -12,17 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import abc
+import json
 import logging
 import re
 
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import flags
+from perfkitbenchmarker import flag_util
+from perfkitbenchmarker import kubernetes_helper
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import providers
+from perfkitbenchmarker import resource
 from perfkitbenchmarker.vm_util import OUTPUT_STDOUT as STDOUT,\
     OUTPUT_STDERR as STDERR, OUTPUT_EXIT_CODE as EXIT_CODE
+from perfkitbenchmarker.configs import option_decoders
 
 FLAGS = flags.FLAGS
+_K8S_VOLUME_REGISTRY = {}
 
 
 def CreateDisks(disk_specs, vm_name):
@@ -32,13 +40,63 @@ def CreateDisks(disk_specs, vm_name):
   """
   scratch_disks = []
   for disk_num, disk_spec in enumerate(disk_specs):
-    if disk_spec.disk_type == disk.LOCAL:
-      scratch_disk = LocalDisk(disk_num, disk_spec, vm_name)
-    else:
-      scratch_disk = CephDisk(disk_num, disk_spec, vm_name)
-    scratch_disk._Create()
+    disk_class = GetKubernetesDiskClass(disk_spec.disk_type)
+    scratch_disk = disk_class(disk_num, disk_spec, vm_name)
+    scratch_disk.Create()
     scratch_disks.append(scratch_disk)
   return scratch_disks
+
+
+class KubernetesDiskSpec(disk.BaseDiskSpec):
+
+  CLOUD = providers.KUBERNETES
+
+  @classmethod
+  def _GetOptionDecoderConstructions(cls):
+    result = super(KubernetesDiskSpec, cls)._GetOptionDecoderConstructions()
+    result.update({
+        'provisioner': (option_decoders.StringDecoder,
+                        {'default': None, 'none_ok': True}),
+        'parameters': (option_decoders.TypeVerifier,
+                       {'default': {}, 'valid_types': (dict,)})
+    })
+    return result
+
+  @classmethod
+  def _ApplyFlags(cls, config_values, flag_values):
+    """Overrides config values with flag values.
+
+    Can be overridden by derived classes to add support for specific flags.
+
+    Args:
+      config_values: dict mapping config option names to provided values. Is
+          modified by this function.
+      flag_values: flags.FlagValues. Runtime flags that may override the
+          provided config values.
+
+    Returns:
+      dict mapping config option names to values derived from the config
+      values or flag values.
+    """
+    super(KubernetesDiskSpec, cls)._ApplyFlags(config_values, flag_values)
+    if flag_values['k8s_volume_provisioner'].present:
+      config_values['provisioner'] = flag_values.k8s_volume_provisioner
+    if flag_values['k8s_volume_parameters'].present:
+      config_values['parameters'] = config_values.get('parameters', {})
+      config_values['parameters'].update(
+          flag_util.ParseKeyValuePairs(flag_values.k8s_volume_parameters))
+
+
+def GetKubernetesDiskClass(volume_type):
+  return _K8S_VOLUME_REGISTRY[volume_type]
+
+
+class AutoRegisterKubernetesDiskMeta(abc.ABCMeta):
+  """Metaclass that registers Kubernetes disks by volume type."""
+
+  def __init__(cls, name, bases, dct):
+    super(AutoRegisterKubernetesDiskMeta, cls).__init__(name, bases, dct)
+    _K8S_VOLUME_REGISTRY[cls.K8S_VOLUME_TYPE] = cls
 
 
 class KubernetesDisk(disk.BaseDisk):
@@ -46,9 +104,12 @@ class KubernetesDisk(disk.BaseDisk):
   Base class for Kubernetes Disks.
   """
 
-  def __init__(self, disk_spec):
+  __metaclass__ = AutoRegisterKubernetesDiskMeta
+  K8S_VOLUME_TYPE = None
+
+  def __init__(self, disk_num, disk_spec, name):
     super(KubernetesDisk, self).__init__(disk_spec)
-    self.mount_point = disk_spec.mount_point
+    self.name = '%s-%s' % (name, disk_num)
 
   def _Create(self):
     return
@@ -73,14 +134,12 @@ class KubernetesDisk(disk.BaseDisk):
     volume_mounts.append(volume_mount)
 
 
-class LocalDisk(KubernetesDisk):
+class EmptyDirDisk(KubernetesDisk):
   """
   Implementation of Kubernetes 'emptyDir' type of volume.
   """
 
-  def __init__(self, disk_num, disk_spec, name):
-    super(LocalDisk, self).__init__(disk_spec)
-    self.name = 'local-disk-%s-%s' % (name, disk_num)
+  K8S_VOLUME_TYPE = 'emptyDir'
 
   def GetDevicePath(self):
     """
@@ -103,9 +162,10 @@ class CephDisk(KubernetesDisk):
   Implementation of Kubernetes 'rbd' type of volume.
   """
 
+  K8S_VOLUME_TYPE = 'rbd'
+
   def __init__(self, disk_num, disk_spec, name):
-    super(CephDisk, self).__init__(disk_spec)
-    self.name = 'rbd-%s-%s' % (name, disk_num)
+    super(CephDisk, self).__init__(disk_num, disk_spec, name)
     self.ceph_secret = FLAGS.ceph_secret
 
   def _Create(self):
@@ -183,3 +243,108 @@ class CephDisk(KubernetesDisk):
 
   def GetDevicePath(self):
     return self.device_path
+
+
+class PersistentVolumeClaim(resource.BaseResource):
+  """Object representing a K8s PVC."""
+
+  def __init__(self, name, storage_class, size):
+    super(PersistentVolumeClaim, self).__init__()
+    self.name = name
+    self.storage_class = storage_class
+    self.size = size
+
+  def _Create(self):
+    """Creates the PVC."""
+    body = self._BuildBody()
+    kubernetes_helper.CreateResource(body)
+
+  def _Delete(self):
+    """Deletes the PVC."""
+    body = self._BuildBody()
+    kubernetes_helper.DeleteResource(body)
+
+  def _BuildBody(self):
+    """Builds JSON representing the PVC."""
+    body = {
+        'kind': 'PersistentVolumeClaim',
+        'apiVersion': 'v1',
+        'metadata': {
+            'name': self.name
+        },
+        'spec': {
+            'accessModes': ['ReadWriteOnce'],
+            'resources': {
+                'requests': {
+                    'storage': '%sGi' % self.size
+                }
+            },
+            'storageClassName': self.storage_class,
+        }
+    }
+    return json.dumps(body)
+
+
+class StorageClass(resource.BaseResource):
+  """Object representing a K8s StorageClass (with dynamic provisioning)."""
+
+  def __init__(self, name, provisioner, parameters):
+    super(StorageClass, self).__init__()
+    self.name = name
+    self.provisioner = provisioner
+    self.parameters = parameters
+
+  def _Create(self):
+    """Creates the PVC."""
+    body = self._BuildBody()
+    kubernetes_helper.CreateResource(body)
+
+  def _Delete(self):
+    """Deletes the PVC."""
+    body = self._BuildBody()
+    kubernetes_helper.DeleteResource(body)
+
+  def _BuildBody(self):
+    """Builds JSOM representing the StorageClass."""
+    body = {
+        'kind': 'StorageClass',
+        'apiVersion': 'storage.k8s.io/v1',
+        'metadata': {
+            'name': self.name
+        },
+        'provisioner': self.provisioner,
+        'parameters': self.parameters
+    }
+    return json.dumps(body)
+
+
+class PvcVolume(KubernetesDisk):
+  """Volume representing a persistent volume claim."""
+
+  K8S_VOLUME_TYPE = 'persistentVolumeClaim'
+  PROVISIONER = None
+
+  def __init__(self, disk_num, spec, name):
+    super(PvcVolume, self).__init__(disk_num, spec, name)
+    self.storage_class = StorageClass(
+        name, self.PROVISIONER or spec.provisioner, spec.parameters)
+    self.pvc = PersistentVolumeClaim(
+        self.name, self.storage_class.name, spec.disk_size)
+    self.metadata = spec.parameters
+
+  def _Create(self):
+    self.storage_class.Create()
+    self.pvc.Create()
+
+  def _Delete(self):
+    self.pvc.Delete()
+    self.storage_class.Delete()
+
+  def AttachVolumeInfo(self, volumes):
+    pvc_volume = {
+        'name': self.name,
+        'persistentVolumeClaim': {
+            'claimName': self.name
+        }
+    }
+    volumes.append(pvc_volume)

@@ -18,12 +18,29 @@ This is a set of benchmarks that measures performance of MySQL Databases on
 managed MySQL services.
 
 - On AWS, we will use RDS+MySQL.
-- On GCP, we will use Cloud SQL v2 (Performance Edition). As of July 2015, you
- will need to request to whitelist your GCP project to get access to Cloud SQL
- v2. Follow instructions on your GCP's project console to do that.
+- On GCP, we will use Cloud SQL v2 (Performance Edition).
 
 As other cloud providers deliver a managed MySQL service, we will add it here.
 
+As of May 2017 to make this benchmark run for GCP you must install the
+gcloud beta component. This is necessary because creating a Cloud SQL instance
+with a non-default storage size is in beta right now. This can be removed when
+this feature is part of the default components.
+See https://cloud.google.com/sdk/gcloud/reference/beta/sql/instances/create
+for more information.
+To run this benchmark for GCP it is required to install a non-default gcloud
+component. Otherwise this benchmark will fail.
+
+To ensure that gcloud beta is installed, type
+        'gcloud components list'
+into the terminal. This will output all components and status of each.
+Make sure that
+  name: gcloud Beta Commands
+  id:  beta
+has status: Installed.
+If not, run
+        'gcloud components install beta'
+to install it. This will allow this benchmark to properly create an instance.
 """
 import json
 import logging
@@ -41,28 +58,41 @@ from perfkitbenchmarker.providers.aws import aws_network
 from perfkitbenchmarker.providers.aws import util
 from perfkitbenchmarker.linux_packages import sysbench05plus
 
+
+MYSQL_SVC_OLTP_TABLES_COUNT = 'mysql_svc_oltp_tables_count'
+MYSQL_SVC_OLTP_TABLE_SIZE = 'mysql_svc_oltp_table_size'
+MYSQL_SVC_DB_INSTANCE_CORES = 'mysql_svc_db_instance_cores'
+MYSQL_INSTANCE_STORAGE_SIZE = 'mysql_instance_storage_size'
+SYSBENCH_WARMUP_SECONDS = 'sysbench_warmup_seconds'
+SYSBENCH_RUN_SECONDS = 'sysbench_run_seconds'
+SYSBENCH_THREAD_COUNT = 'sysbench_thread_count'
+SYSBENCH_LATENCY_PERCENTILE = 'sysbench_latency_percentile'
+SYSBENCH_REPORT_INTERVAL = 'sysbench_report_interval'
+
 FLAGS = flags.FLAGS
 flags.DEFINE_enum(
     'mysql_svc_db_instance_cores', '4', ['1', '4', '8', '16'],
     'The number of cores to be provisioned for the DB instance.')
 
-flags.DEFINE_integer('mysql_svc_oltp_tables_count', 4,
+flags.DEFINE_integer(MYSQL_SVC_OLTP_TABLES_COUNT, 4,
                      'The number of tables used in sysbench oltp.lua tests')
-flags.DEFINE_integer('mysql_svc_oltp_table_size', 100000,
+flags.DEFINE_integer(MYSQL_SVC_OLTP_TABLE_SIZE, 100000,
                      'The number of rows of each table used in the oltp tests')
-flags.DEFINE_integer('sysbench_warmup_seconds', 120,
+flags.DEFINE_integer(SYSBENCH_WARMUP_SECONDS, 120,
                      'The duration of the warmup run in which results are '
                      'discarded, in seconds.')
-flags.DEFINE_integer('sysbench_run_seconds', 480,
+flags.DEFINE_integer(SYSBENCH_RUN_SECONDS, 480,
                      'The duration of the actual run in which results are '
                      'collected, in seconds.')
-flags.DEFINE_integer('sysbench_thread_count', 16,
+flags.DEFINE_integer(SYSBENCH_THREAD_COUNT, 16,
                      'The number of test threads on the client side.')
-flags.DEFINE_integer('sysbench_latency_percentile', 99,
+flags.DEFINE_integer(SYSBENCH_LATENCY_PERCENTILE, 99,
                      'The latency percentile we ask sysbench to compute.')
-flags.DEFINE_integer('sysbench_report_interval', 2,
+flags.DEFINE_integer(SYSBENCH_REPORT_INTERVAL, 2,
                      'The interval, in seconds, we ask sysbench to report '
                      'results.')
+flags.DEFINE_integer(MYSQL_INSTANCE_STORAGE_SIZE, 100,
+                     'Storage size for SQL instance in GB.')
 
 BENCHMARK_NAME = 'mysql_service'
 BENCHMARK_CONFIG = """
@@ -91,14 +121,6 @@ RDS_CORE_TO_DB_CLASS_MAP = {
 RDS_DB_ENGINE = 'MySQL'
 RDS_DB_ENGINE_VERSION = '5.6.23'
 RDS_DB_STORAGE_TYPE_GP2 = 'gp2'
-# Storage IOPS capacity of the DB instance.
-# Currently this is fixed because the cloud provider GCP does not support
-# changing this setting. As soon as it supports changing the storage size, we
-# will expose a flag here to allow caller to select a storage size.
-# Default GCP storage size is 1TB PD-SSD which supports 10K Read or 15K Write
-# IOPS (12.5K mixed).
-# To support 12.5K IOPS on EBS-GP, we need 4170 GB disk.
-RDS_DB_STORAGE_GP2_SIZE = '4170'
 
 # A list of status strings that are possible during RDS DB creation.
 RDS_DB_CREATION_PENDING_STATUS = frozenset(
@@ -113,9 +135,6 @@ MYSQL_ROOT_USER = 'root'
 MYSQL_ROOT_PASSWORD_PREFIX = 'Perfkit8'
 MYSQL_PORT = '3306'
 
-PREPARE_SCRIPT_PATH = '/share/doc/sysbench/tests/db/parallel_prepare.lua'
-OLTP_SCRIPT_PATH = '/share/doc/sysbench/tests/db/oltp.lua'
-
 SYSBENCH_RESULT_NAME_DATA_LOAD = 'sysbench data load time'
 SYSBENCH_RESULT_NAME_TPS = 'sysbench tps'
 SYSBENCH_RESULT_NAME_LATENCY = 'sysbench latency'
@@ -125,7 +144,7 @@ MS_UNIT = 'milliseconds'
 
 # These are the constants that should be specified in GCP's cloud SQL command.
 DEFAULT_BACKUP_START_TIME = '07:00'
-GCP_MY_SQL_VERSION = 'MYSQL_5_6'
+GCP_MY_SQL_VERSION = 'MYSQL_5_7'
 GCP_PRICING_PLAN = 'PACKAGE'
 
 RESPONSE_TIME_TOKENS = ['min', 'avg', 'max', 'percentile']
@@ -133,6 +152,10 @@ RESPONSE_TIME_TOKENS = ['min', 'avg', 'max', 'percentile']
 
 def GetConfig(user_config):
   return configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
+
+
+class StorageSizeFlagError(Exception):
+  pass
 
 
 class DBStatusQueryError(Exception):
@@ -267,7 +290,7 @@ def ParseSysbenchOutput(sysbench_output, results, metadata):
         metadata))
 
 
-def _IssueSysbenchCommand(vm, duration):
+def _IssueSysbenchCommand(vm, duration, metadata):
   """Issues a sysbench run command given a vm and a duration.
 
       Does nothing if duration is <= 0
@@ -275,25 +298,29 @@ def _IssueSysbenchCommand(vm, duration):
   Args:
     vm: The test VM to issue command to.
     duration: the duration of the sysbench run.
+    metadata: The PKB metadata to be passed along to the final results.
 
   Returns:
     stdout, stderr: the result of the command.
   """
   stdout = ''
   stderr = ''
-  oltp_script_path = sysbench05plus.PathPrefix(vm) + OLTP_SCRIPT_PATH
+  num_threads = metadata[SYSBENCH_THREAD_COUNT]
+  tables_count = metadata[MYSQL_SVC_OLTP_TABLES_COUNT]
+  table_size = metadata[MYSQL_SVC_OLTP_TABLE_SIZE]
+  oltp_script_path = sysbench05plus.OLTP_SCRIPT_PATH
   if duration > 0:
-    run_cmd_tokens = ['sysbench',
+    run_cmd_tokens = ['%s' % sysbench05plus.SYSBENCH05PLUS_PATH,
                       '--test=%s' % oltp_script_path,
-                      '--mysql_svc_oltp_tables_count=%d' %
-                      FLAGS.mysql_svc_oltp_tables_count,
+                      '--oltp_tables_count=%d' %
+                      tables_count,
                       '--oltp-table-size=%d' %
-                      FLAGS.mysql_svc_oltp_table_size,
+                      table_size,
                       '--rand-init=%s' % RAND_INIT_ON,
                       '--db-ps-mode=%s' % DISABLE,
                       '--oltp-dist-type=%s' % UNIFORM,
                       '--oltp-read-only=%s' % OFF,
-                      '--num-threads=%d' % FLAGS.sysbench_thread_count,
+                      '--num-threads=%d' % num_threads,
                       '--percentile=%d' % FLAGS.sysbench_latency_percentile,
                       '--report-interval=%d' %
                       FLAGS.sysbench_report_interval,
@@ -324,6 +351,44 @@ def _RunSysbench(vm, metadata):
   Returns:
     Results: A list of results of this run.
   """
+  results = DATA_LOADING_RESULTS
+
+  if not hasattr(vm, 'db_instance_address'):
+    logging.error(
+        'Prepare has likely failed, db_instance_address is not found.')
+    raise DBStatusQueryError('RunSysbench: DB instance address not found.')
+
+  # Now run the sysbench OLTP test and parse the results.
+  # First step is to run the test long enough to cover the warmup period
+  # as requested by the caller. Second step is the 'real' run where the results
+  # are parsed and reported.
+
+  warmup_seconds = FLAGS.sysbench_warmup_seconds
+  if warmup_seconds > 0:
+    logging.info('Sysbench warm-up run, duration is %d', warmup_seconds)
+    _IssueSysbenchCommand(vm, warmup_seconds, metadata)
+
+  run_seconds = FLAGS.sysbench_run_seconds
+  logging.info('Sysbench real run, duration is %d', run_seconds)
+  stdout, _ = _IssueSysbenchCommand(vm, run_seconds, metadata)
+  logging.info('\n Parsing Sysbench Results...\n')
+  ParseSysbenchOutput(stdout, results, metadata)
+
+  return results
+
+
+def _PrepareSysbench(vm, metadata):
+  """Prepare the Sysbench OLTP test with data loading stage.
+
+  Data loaded on the DB instance indicated by the vm.db_instance_address.
+
+  Args:
+    vm: The client VM that will issue the sysbench test.
+    metadata: The PKB metadata to be passed along to the final results.
+
+  Returns:
+    results: A list of results of the data loading step.
+  """
   results = []
 
   if not hasattr(vm, 'db_instance_address'):
@@ -345,16 +410,22 @@ def _RunSysbench(vm, metadata):
   # Provision the Sysbench test based on the input flags (load data into DB)
   # Could take a long time if the data to be loaded is large.
   data_load_start_time = time.time()
-  prepare_script_path = sysbench05plus.PathPrefix(vm) + PREPARE_SCRIPT_PATH
-  data_load_cmd_tokens = ['sysbench',
+  # Data loading is write only so need num_threads less than or equal to the
+  # amount of tables.
+  num_threads = min(metadata[MYSQL_SVC_OLTP_TABLES_COUNT],
+                    metadata[SYSBENCH_THREAD_COUNT])
+  tables_count = metadata[MYSQL_SVC_OLTP_TABLES_COUNT]
+  table_size = metadata[MYSQL_SVC_OLTP_TABLE_SIZE]
+  prepare_script_path = sysbench05plus.PREPARE_SCRIPT_PATH
+  data_load_cmd_tokens = ['%s' % sysbench05plus.SYSBENCH05PLUS_PATH,
                           '--test=%s' % prepare_script_path,
-                          '--mysql_svc_oltp_tables_count=%d' %
-                          FLAGS.mysql_svc_oltp_tables_count,
+                          '--oltp_tables_count=%d' %
+                          tables_count,
                           '--oltp-table-size=%d' %
-                          FLAGS.mysql_svc_oltp_table_size,
+                          table_size,
                           '--rand-init=%s' % RAND_INIT_ON,
                           '--num-threads=%d' %
-                          FLAGS.mysql_svc_oltp_tables_count,
+                          num_threads,
                           '--mysql-user=%s' % vm.db_instance_master_user,
                           '--mysql-password="%s"' %
                           vm.db_instance_master_password,
@@ -376,26 +447,6 @@ def _RunSysbench(vm, metadata):
       load_duration,
       SECONDS_UNIT,
       metadata))
-
-  # Now run the sysbench OLTP test and parse the results.
-  for phase in ['warm-up', 'run']:
-    # First step is to run the test long enough to cover the warmup period
-    # as requested by the caller. Then we do the "real" run, parse and report
-    # the results.
-    duration = 0
-    if phase == 'warm-up' and FLAGS.sysbench_warmup_seconds > 0:
-      duration = FLAGS.sysbench_warmup_seconds
-      logging.info('Sysbench warm-up run, duration is %d', duration)
-    elif phase == 'run':
-      duration = FLAGS.sysbench_run_seconds
-      logging.info('Sysbench real run, duration is %d', duration)
-
-    stdout, stderr = _IssueSysbenchCommand(vm, duration)
-
-    if phase == 'run':
-      # We only need to parse the results for the "real" run.
-      logging.info('\n Parsing Sysbench Results...\n')
-      ParseSysbenchOutput(stdout, results, metadata)
 
   return results
 
@@ -429,7 +480,6 @@ class RDSMySQLBenchmark(object):
 
     Args:
       vm: The VM to be used as the test client.
-
     """
     logging.info('Preparing MySQL Service benchmarks for RDS.')
 
@@ -445,6 +495,7 @@ class RDSMySQLBenchmark(object):
 
     # Get a list of zones and pick one that's different from the zone VM is in.
     new_subnet_zone = None
+    self._ValidateSize(FLAGS.mysql_instance_storage_size)
     get_zones_cmd = util.AWS_PREFIX + ['ec2', 'describe-availability-zones']
     stdout, _, _ = vm_util.IssueCommand(get_zones_cmd)
     response = json.loads(stdout)
@@ -509,7 +560,7 @@ class RDSMySQLBenchmark(object):
         '--engine', RDS_DB_ENGINE,
         '--engine-version', RDS_DB_ENGINE_VERSION,
         '--storage-type', RDS_DB_STORAGE_TYPE_GP2,
-        '--allocated-storage', RDS_DB_STORAGE_GP2_SIZE,
+        '--allocated-storage', FLAGS.mysql_instance_storage_size,
         '--vpc-security-group-ids', vm.group_id,
         '--master-username', vm.db_instance_master_user,
         '--master-user-password', vm.db_instance_master_password,
@@ -563,6 +614,18 @@ class RDSMySQLBenchmark(object):
     logging.info('Successfully created an RDS DB instance. Address is %s',
                  vm.db_instance_address)
     logging.info('Complete output is:\n %s', response)
+
+  def _ValidateSize(self, size):
+    """Validate flag for storage size and throw exception if invalid.
+
+    AWS supports storage sizes from 1GB to 16TB currently.
+
+    Args:
+      size: (GB).
+    """
+    if size < 1 or size > 16000:
+      raise StorageSizeFlagError('Storage size flag given is not valid. '
+                                 'Must be between 1 and 16000 GB for AWS.')
 
   def Cleanup(self, vm):
     """Clean up RDS instances, cleanup the extra subnet created for the
@@ -664,7 +727,6 @@ class GoogleCloudSQLBenchmark(object):
 
     Args:
       vm: The VM to be used as the test client
-
     """
     # TODO: Refactor the GCP Cloud SQL instance creation and deletion logic out
     # to a new class called GCPCloudSQLInstance that Inherits from
@@ -673,13 +735,23 @@ class GoogleCloudSQLBenchmark(object):
     logging.info('Preparing MySQL Service benchmarks for Google Cloud SQL.')
 
     vm.db_instance_name = 'pkb%s' % FLAGS.run_uri
+    self._ValidateSize(FLAGS.mysql_instance_storage_size)
     db_tier = 'db-n1-standard-%s' % FLAGS.mysql_svc_db_instance_cores
     # Currently, we create DB instance in the same zone as the test VM.
     db_instance_zone = vm.zone
     # Currently GCP REQUIRES you to connect to the DB instance via external IP
     # (i.e., using external IPs of the DB instance AND the VM instance).
     authorized_network = '%s/32' % vm.ip_address
+    # Please install gcloud component beta for this to work. See note in
+    # module level docstring.
+    # This is necessary only because creating a SQL instance with a non-default
+    # storage size is in beta right now in gcloud. This can be removed when
+    # this feature is part of the default components. See
+    # https://cloud.google.com/sdk/gcloud/reference/beta/sql/instances/create
+    # for more information. When this flag is allowed in the default gcloud
+    # components the create_db_cmd below can be updated.
     create_db_cmd = [FLAGS.gcloud_path,
+                     'beta',
                      'sql',
                      'instances',
                      'create', vm.db_instance_name,
@@ -694,14 +766,11 @@ class GoogleCloudSQLBenchmark(object):
                      '--tier=%s' % db_tier,
                      '--gce-zone=%s' % db_instance_zone,
                      '--database-version=%s' % GCP_MY_SQL_VERSION,
-                     '--pricing-plan=%s' % GCP_PRICING_PLAN]
+                     '--pricing-plan=%s' % GCP_PRICING_PLAN,
+                     '--storage-size=%d' % FLAGS.mysql_instance_storage_size]
 
     stdout, _, _ = vm_util.IssueCommand(create_db_cmd)
-    response = json.loads(stdout)
-    if response['operation'] is None or response['operationType'] != 'CREATE':
-      raise DBStatusQueryError('Invalid operation or unrecognized '
-                               'operationType in DB creation response. '
-                               ' stdout is %s' % stdout)
+    logging.info('Create SQL instance completed. Stdout:\n%s', stdout)
 
     status_query_cmd = [FLAGS.gcloud_path,
                         'sql',
@@ -756,6 +825,18 @@ class GoogleCloudSQLBenchmark(object):
     logging.info('Set root password completed. Stdout:\n%s\nStderr:\n%s',
                  stdout, stderr)
 
+  def _ValidateSize(self, size):
+    """Validate flag for storage size and throw exception if invalid.
+
+    GCP supports storage sizes from 1GB to 64TB currently.
+
+    Args:
+      size: (GB).
+    """
+    if size < 1 or size > 64000:
+      raise StorageSizeFlagError('Storage size flag is not valid. Must'
+                                 ' be between 1 and 64000 GB for GCP.')
+
   def Cleanup(self, vm):
     if hasattr(vm, 'db_instance_name'):
       delete_db_cmd = [FLAGS.gcloud_path,
@@ -775,9 +856,14 @@ MYSQL_SERVICE_BENCHMARK_DICTIONARY = {
     providers.GCP: GoogleCloudSQLBenchmark(),
     providers.AWS: RDSMySQLBenchmark()}
 
+# Needs to be a global variable so the data loading results will persist
+# from Prepare to Run stage when called together.
+DATA_LOADING_RESULTS = []
+
 
 def Prepare(benchmark_spec):
   """Prepare the MySQL DB Instances, configures it.
+
      Prepare the client test VM, installs SysBench, configures it.
 
   Args:
@@ -796,8 +882,24 @@ def Prepare(benchmark_spec):
   # Setup common test tools required on the client VM
   vms[0].Install('sysbench05plus')
 
+  benchmark_spec.mysql_svc_oltp_tables_count = FLAGS.mysql_svc_oltp_tables_count
+  benchmark_spec.mysql_svc_oltp_table_size = FLAGS.mysql_svc_oltp_table_size
+
   # Prepare service specific states (create DB instance, configure it, etc)
   MYSQL_SERVICE_BENCHMARK_DICTIONARY[FLAGS.cloud].Prepare(vms[0])
+
+  metadata = {
+      MYSQL_SVC_OLTP_TABLES_COUNT: benchmark_spec.mysql_svc_oltp_tables_count,
+      MYSQL_SVC_OLTP_TABLE_SIZE: benchmark_spec.mysql_svc_oltp_table_size,
+      MYSQL_SVC_DB_INSTANCE_CORES: FLAGS.mysql_svc_db_instance_cores,
+      SYSBENCH_WARMUP_SECONDS: FLAGS.sysbench_warmup_seconds,
+      SYSBENCH_RUN_SECONDS: FLAGS.sysbench_run_seconds,
+      SYSBENCH_THREAD_COUNT: FLAGS.sysbench_thread_count,
+      SYSBENCH_LATENCY_PERCENTILE: FLAGS.sysbench_latency_percentile,
+      SYSBENCH_REPORT_INTERVAL: FLAGS.sysbench_report_interval
+  }
+  DATA_LOADING_RESULTS = _PrepareSysbench(vms[0], metadata)
+  print DATA_LOADING_RESULTS
 
 
 def Run(benchmark_spec):
@@ -814,14 +916,14 @@ def Run(benchmark_spec):
                'Cloud Provider is %s.', FLAGS.cloud)
   vms = benchmark_spec.vms
   metadata = {
-      'mysql_svc_oltp_tables_count': FLAGS.mysql_svc_oltp_tables_count,
-      'mysql_svc_oltp_table_size': FLAGS.mysql_svc_oltp_table_size,
-      'mysql_svc_db_instance_cores': FLAGS.mysql_svc_db_instance_cores,
-      'sysbench_warm_up_seconds': FLAGS.sysbench_warmup_seconds,
-      'sysbench_run_seconds': FLAGS.sysbench_run_seconds,
-      'sysbench_thread_count': FLAGS.sysbench_thread_count,
-      'sysbench_latency_percentile': FLAGS.sysbench_latency_percentile,
-      'sysbench_report_interval': FLAGS.sysbench_report_interval
+      MYSQL_SVC_OLTP_TABLES_COUNT: benchmark_spec.mysql_svc_oltp_tables_count,
+      MYSQL_SVC_OLTP_TABLE_SIZE: benchmark_spec.mysql_svc_oltp_table_size,
+      MYSQL_SVC_DB_INSTANCE_CORES: FLAGS.mysql_svc_db_instance_cores,
+      SYSBENCH_WARMUP_SECONDS: FLAGS.sysbench_warmup_seconds,
+      SYSBENCH_RUN_SECONDS: FLAGS.sysbench_run_seconds,
+      SYSBENCH_THREAD_COUNT: FLAGS.sysbench_thread_count,
+      SYSBENCH_LATENCY_PERCENTILE: FLAGS.sysbench_latency_percentile,
+      SYSBENCH_REPORT_INTERVAL: FLAGS.sysbench_report_interval
   }
 
   # The run phase is common across providers. The VMs[0] object contains all

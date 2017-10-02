@@ -40,6 +40,9 @@ flags.DEFINE_string('gce_subnet_region', None, 'Region to create subnet in '
 flags.DEFINE_string('gce_subnet_addr', '10.128.0.0/20', 'Address range to the '
                     'subnet, given in CDR notation. Not used unless '
                     '--gce_subnet_region is given.')
+flags.DEFINE_string('gce_remote_access_firewall_rule', None, 'The name of an '
+                    'already created firewall rule which allows remote access '
+                    'instead of creating a new one.')
 flags.DEFINE_multistring(
     'gcp_instance_metadata_from_file',
     [],
@@ -62,3 +65,27 @@ flags.DEFINE_integer('gce_boot_disk_size', None,
                      'The boot disk size in GB for GCP VMs.')
 flags.DEFINE_enum('gce_boot_disk_type', None, ['pd-standard', 'pd-ssd'],
                   'The boot disk type for GCP VMs.')
+flags.DEFINE_enum('gce_ssd_interface', 'SCSI', ['SCSI', 'NVME'],
+                  'The ssd interface for GCE local SSD.')
+flags.DEFINE_integer(
+    'gcp_num_vms_per_host', None,
+    'The number of VMs per dedicated host. If None, VMs will be packed on a '
+    'single host until no more can be packed at which point a new host will '
+    'be created.')
+flags.DEFINE_string(
+    'gcp_host_type', None,
+    'The host type of all sole tenant hosts that get created.')
+flags.DEFINE_enum(
+    'gcp_min_cpu_platform', None,
+    ['sandybridge', 'ivybridge', 'haswell', 'broadwell', 'skylake'],
+    'When specified, the VM will have either the specified '
+    'architecture or a newer one. Architecture availability is zone dependent.')
+flags.DEFINE_integer(
+    'gcp_gpu_count', None,
+    'Number of gpus to attach to the VM. Requires gce_gpu_type to be '
+    'specified.')
+flags.DEFINE_enum(
+    'gcp_gpu_type', None,
+    ['k80', 'p100'],
+    'Type of gpus to attach to the VM. Requires gce_gpu_count to be '
+    'specified.')

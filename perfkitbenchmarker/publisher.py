@@ -38,6 +38,7 @@ from perfkitbenchmarker import disk
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import flag_util
 from perfkitbenchmarker import log_util
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import version
 from perfkitbenchmarker import vm_util
 
@@ -174,9 +175,14 @@ class DefaultMetadataProvider(MetadataProvider):
   def AddMetadata(self, metadata, benchmark_spec):
     metadata = metadata.copy()
     metadata['perfkitbenchmarker_version'] = version.VERSION
+    if FLAGS.simulate_maintenance:
+      metadata['simulate_maintenance'] = True
     if FLAGS.hostname_metadata:
       metadata['hostnames'] = ','.join([vm.hostname
                                         for vm in benchmark_spec.vms])
+    if benchmark_spec.container_cluster:
+      metadata.update(benchmark_spec.container_cluster.GetMetadata())
+
     for name, vms in benchmark_spec.vm_groups.iteritems():
       if len(vms) == 0:
         continue
@@ -206,6 +212,9 @@ class DefaultMetadataProvider(MetadataProvider):
           metadata[name_prefix + 'aws_provisioned_iops'] = data_disk.iops
         # Modern metadata keys
         metadata[name_prefix + 'data_disk_0_type'] = disk_type
+        if disk_type == disk.LOCAL and vm.CLOUD == providers.GCP:
+          metadata[
+              name_prefix + 'data_disk_0_interface'] = FLAGS.gce_ssd_interface
         metadata[name_prefix + 'data_disk_count'] = len(vm.scratch_disks)
         metadata[name_prefix + 'data_disk_0_size'] = (
             disk_size * num_stripes if disk_size else disk_size)

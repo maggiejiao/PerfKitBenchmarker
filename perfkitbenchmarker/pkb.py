@@ -58,6 +58,7 @@ all: PerfKitBenchmarker will run all of the above stages (provision,
 import collections
 import getpass
 import itertools
+import json
 import logging
 import multiprocessing
 import re
@@ -81,6 +82,7 @@ from perfkitbenchmarker import linux_benchmarks
 from perfkitbenchmarker import log_util
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import requirements
+from perfkitbenchmarker import sample
 from perfkitbenchmarker import spark_service
 from perfkitbenchmarker import stages
 from perfkitbenchmarker import static_virtual_machine
@@ -94,6 +96,7 @@ from perfkitbenchmarker.linux_benchmarks import cluster_boot_benchmark
 from perfkitbenchmarker.publisher import SampleCollector
 
 LOG_FILE_NAME = 'pkb.log'
+COMPLETION_STATUS_FILE_NAME = 'completion_statuses.json'
 REQUIRED_INFO = ['scratch_disk', 'num_machines']
 REQUIRED_EXECUTABLES = frozenset(['ssh', 'ssh-keygen', 'scp', 'openssl'])
 FLAGS = flags.FLAGS
@@ -215,8 +218,25 @@ flags.DEFINE_integer(
     'The number of parallel processes to use to run benchmarks.',
     lower_bound=1)
 flags.DEFINE_string(
+    'completion_status_file', None,
+    'If specified, this file will contain the completion status of each '
+    'benchmark that ran (SUCCEEDED, FAILED, or SKIPPED). The file has one json '
+    'object per line, each with the following format:\n'
+    '{ "name": <benchmark name>, "flags": <flags dictionary>, '
+    '"status": <completion status> }')
+flags.DEFINE_string(
     'helpmatch', '',
     'Shows only flags defined in a module whose name matches the given regex.')
+flags.DEFINE_boolean(
+    'create_failed_run_samples', False,
+    'If true, PKB will create a sample specifying that a run stage failed. '
+    'This sample will include metadata specifying the run stage that '
+    'failed, the exception that occured, as well as all the flags that '
+    'were provided to PKB on the command line.')
+flags.DEFINE_integer(
+    'failed_run_samples_error_length', 10240,
+    'If create_failed_run_samples is true, PKB will truncate any error '
+    'messages at failed_run_samples_error_length.')
 
 # Support for using a proxy in the cloud environment.
 flags.DEFINE_string('http_proxy', '',
@@ -362,6 +382,30 @@ def _CreateBenchmarkSpecs():
   return specs
 
 
+def _WriteCompletionStatusFile(benchmark_specs, status_file):
+  """Writes a completion status file.
+
+  The file has one json object per line, each with the following format:
+
+  {
+    "name": <benchmark name>,
+    "status": <completion status>,
+    "flags": <flags dictionary>
+  }
+
+  Args:
+    benchmark_specs: The list of BenchmarkSpecs that ran.
+    status_file: The file object to write the json structures to.
+  """
+  for spec in benchmark_specs:
+    # OrderedDict so that we preserve key order in json file
+    status_dict = collections.OrderedDict()
+    status_dict['name'] = spec.name
+    status_dict['status'] = spec.status
+    status_dict['flags'] = spec.config.flags
+    status_file.write(json.dumps(status_dict) + '\n')
+
+
 def DoProvisionPhase(spec, timer):
   """Performs the Provision phase of benchmark execution.
 
@@ -371,9 +415,11 @@ def DoProvisionPhase(spec, timer):
       provisioning.
   """
   logging.info('Provisioning resources for benchmark %s', spec.name)
+  spec.ConstructContainerCluster()
   # spark service needs to go first, because it adds some vms.
   spec.ConstructSparkService()
   spec.ConstructDpbService()
+  spec.ConstructManagedRelationalDb()
   spec.ConstructVirtualMachines()
   # Pickle the spec before we try to create anything so we can clean
   # everything up on a second run if something goes wrong.
@@ -440,8 +486,8 @@ def DoRunPhase(spec, collector, timer):
     events.samples_created.send(
         events.RUN_PHASE, benchmark_spec=spec, samples=samples)
     if FLAGS.run_stage_time:
-      for sample in samples:
-        sample.metadata['run_number'] = run_number
+      for s in samples:
+        s.metadata['run_number'] = run_number
     collector.AddSamples(samples, spec.name, spec)
     if FLAGS.publish_after_run:
       collector.PublishSamples()
@@ -459,8 +505,8 @@ def DoCleanupPhase(spec, timer):
       benchmark module's Cleanup function.
   """
   logging.info('Cleaning up benchmark %s', spec.name)
-
-  if spec.always_call_cleanup or any([vm.is_static for vm in spec.vms]):
+  if (spec.always_call_cleanup or any([vm.is_static for vm in spec.vms]) or
+          spec.dpb_service is not None):
     spec.StopBackgroundWorkload()
     with timer.Measure('Benchmark Cleanup'):
       spec.BenchmarkCleanup(spec)
@@ -489,6 +535,7 @@ def RunBenchmark(spec, collector):
     collector: The SampleCollector object to add samples to.
   """
   spec.status = benchmark_status.FAILED
+  current_run_stage = stages.PROVISION
   # Modify the logger prompt for messages logged within this function.
   label_extension = '{}({}/{})'.format(
       spec.name, spec.sequence_number, spec.total_benchmarks)
@@ -504,15 +551,19 @@ def RunBenchmark(spec, collector):
             DoProvisionPhase(spec, detailed_timer)
 
           if stages.PREPARE in FLAGS.run_stage:
+            current_run_stage = stages.PREPARE
             DoPreparePhase(spec, detailed_timer)
 
           if stages.RUN in FLAGS.run_stage:
+            current_run_stage = stages.RUN
             DoRunPhase(spec, collector, detailed_timer)
 
           if stages.CLEANUP in FLAGS.run_stage:
+            current_run_stage = stages.CLEANUP
             DoCleanupPhase(spec, detailed_timer)
 
           if stages.TEARDOWN in FLAGS.run_stage:
+            current_run_stage = stages.TEARDOWN
             DoTeardownPhase(spec, detailed_timer)
 
         # Add timing samples.
@@ -524,10 +575,15 @@ def RunBenchmark(spec, collector):
           collector.AddSamples(
               detailed_timer.GenerateSamples(), spec.name, spec)
 
-      except:
+      except Exception as e:
         # Resource cleanup (below) can take a long time. Log the error to give
         # immediate feedback, then re-throw.
         logging.exception('Error during benchmark %s', spec.name)
+        if FLAGS.create_failed_run_samples:
+          collector.AddSamples(MakeFailedRunSample(str(e),
+                                                   current_run_stage),
+                               spec.name,
+                               spec)
         # If the particular benchmark requests us to always call cleanup, do it
         # here.
         if stages.CLEANUP in FLAGS.run_stage and spec.always_call_cleanup:
@@ -540,6 +596,36 @@ def RunBenchmark(spec, collector):
         # Pickle spec to save final resource state.
         spec.Pickle()
   spec.status = benchmark_status.SUCCEEDED
+
+
+def MakeFailedRunSample(error_message, run_stage_that_failed):
+  """Create a sample.Sample representing a failed run stage.
+
+  The sample metric will have the name 'Run Failed';
+  the value will be 1 (has to be convertable to a float),
+  and the unit will be 'Run Failed' (for lack of a better idea).
+
+  The sample metadata will include the error message from the
+  Exception, the run stage that failed, as well as all PKB
+  command line flags that were passed in.
+
+  Args:
+    error_message: error message that was caught, resulting in the
+      run stage failure.
+    run_stage_that_failed: run stage that failed by raising an Exception
+
+  Returns:
+    a sample.Sample representing the run stage failure.
+  """
+  # Note: currently all provided PKB command line flags are included in the
+  # metadata. We may want to only include flags specific to the benchmark that
+  # failed. This can be acomplished using gflag's FlagsByModuleDict().
+  metadata = {
+      'error_message': error_message[0:FLAGS.failed_run_samples_error_length],
+      'run_stage': run_stage_that_failed,
+      'flags': str(flag_util.GetProvidedCommandLineFlags())
+  }
+  return [sample.Sample('Run Failed', 1, 'Run Failed', metadata)]
 
 
 def RunBenchmarkTask(spec):
@@ -585,7 +671,7 @@ def _LogCommandLineFlags():
   for name in FLAGS:
     flag = FLAGS[name]
     if flag.present:
-      result.append(flag.Serialize())
+      result.append(flag.serialize())
   logging.info('Flag values:\n%s', '\n'.join(result))
 
 
@@ -668,6 +754,8 @@ def RunBenchmarks():
 
     logging.info('Complete logs can be found at: %s',
                  vm_util.PrependTempDir(LOG_FILE_NAME))
+    logging.info('Completion statuses can be found at: %s',
+                 vm_util.PrependTempDir(COMPLETION_STATUS_FILE_NAME))
 
 
   if stages.TEARDOWN not in FLAGS.run_stage:
@@ -678,6 +766,16 @@ def RunBenchmarks():
     archive.ArchiveRun(vm_util.GetTempDir(), FLAGS.archive_bucket,
                        gsutil_path=FLAGS.gsutil_path,
                        prefix=FLAGS.run_uri + '_')
+
+  # Write completion status file(s)
+  completion_status_file_name = (
+      vm_util.PrependTempDir(COMPLETION_STATUS_FILE_NAME))
+  with open(completion_status_file_name, 'w') as status_file:
+    _WriteCompletionStatusFile(benchmark_specs, status_file)
+  if FLAGS.completion_status_file:
+    with open(FLAGS.completion_status_file, 'w') as status_file:
+      _WriteCompletionStatusFile(benchmark_specs, status_file)
+
   all_benchmarks_succeeded = all(spec.status == benchmark_status.SUCCEEDED
                                  for spec in benchmark_specs)
   return 0 if all_benchmarks_succeeded else 1

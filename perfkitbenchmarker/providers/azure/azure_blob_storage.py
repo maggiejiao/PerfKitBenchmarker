@@ -78,13 +78,12 @@ class AzureBlobStorageService(object_storage_service.ObjectStorageService):
   def MakeBucket(self, bucket):
     vm_util.IssueRetryableCommand([
         azure.AZURE_PATH, 'storage', 'container', 'create',
-        bucket] + self.storage_account.connection_args)
+        '--name', bucket] + self.storage_account.connection_args)
 
   def DeleteBucket(self, bucket):
     vm_util.IssueCommand([
         azure.AZURE_PATH, 'storage', 'container', 'delete',
-        '--quiet',
-        bucket] + self.storage_account.connection_args)
+        '--name', bucket] + self.storage_account.connection_args)
 
   def EmptyBucket(self, bucket):
     # Emptying buckets on Azure is hard. We pass for now - this will
@@ -94,12 +93,7 @@ class AzureBlobStorageService(object_storage_service.ObjectStorageService):
 
   def PrepareVM(self, vm):
     vm.Install('azure_cli')
-
-    if FLAGS.azure_lib_version:
-      version_string = '==' + FLAGS.azure_lib_version
-    else:
-      version_string = ''
-    vm.RemoteCommand('sudo pip install azure%s' % version_string)
+    vm.Install('azure_sdk')
 
     vm.PushFile(
         object_storage_service.FindCredentialFile('~/' +

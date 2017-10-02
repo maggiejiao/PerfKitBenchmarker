@@ -19,6 +19,7 @@ import re
 
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import regex_util
+from perfkitbenchmarker.data import ResourceNotFound
 from perfkitbenchmarker.linux_packages import INSTALL_DIR
 
 flags.DEFINE_integer(
@@ -30,9 +31,11 @@ flags.DEFINE_integer(
     'increase the precision of the histogram samples that the netperf '
     'benchmark produces.')
 FLAGS = flags.FLAGS
-NETPERF_TAR = 'netperf-2.6.0.tar.gz'
-NETPERF_URL = 'ftp://ftp.netperf.org/netperf/archive/%s' % NETPERF_TAR
-NETPERF_DIR = '%s/netperf-2.6.0' % INSTALL_DIR
+NETPERF_TAR = 'netperf-2.7.0.tar.gz'
+NETPERF_URL = 'https://github.com/HewlettPackard/netperf/archive/%s' % (
+              NETPERF_TAR)
+NETPERF_DIR = '%s/netperf-netperf-2.7.0' % INSTALL_DIR
+
 NETPERF_SRC_DIR = NETPERF_DIR + '/src'
 NETSERVER_PATH = NETPERF_SRC_DIR + '/netserver'
 NETPERF_PATH = NETPERF_SRC_DIR + '/netperf'
@@ -41,10 +44,10 @@ NETLIB_PATCH = NETPERF_SRC_DIR + '/netperf.patch'
 
 def _Install(vm):
   """Installs the netperf package on the VM."""
+  vm.Install('pip')
+  vm.RemoteCommand('sudo pip install python-gflags==2.0')
   vm.Install('build_tools')
-  vm.Install('curl')
-  vm.RemoteCommand('curl %s -o %s/%s' % (
-      NETPERF_URL, INSTALL_DIR, NETPERF_TAR))
+  _CopyTar(vm)
   vm.RemoteCommand('cd %s && tar xvzf %s' % (INSTALL_DIR, NETPERF_TAR))
   # Modify netperf to print out all buckets in its histogram rather than
   # aggregating.
@@ -54,6 +57,20 @@ def _Install(vm):
   vm.RemoteCommand('cd %s && CFLAGS=-DHIST_NUM_OF_BUCKET=%s '
                    './configure --enable-histogram=yes '
                    '&& make' % (NETPERF_DIR, FLAGS.netperf_histogram_buckets))
+
+
+def _CopyTar(vm):
+  """Copy the tar file for installation.
+
+  Tries local data directory first, then NET_PERF_URL
+  """
+
+  try:
+    vm.PushDataFile(NETPERF_TAR, remote_path=(INSTALL_DIR + '/'))
+  except ResourceNotFound:
+    vm.Install('curl')
+    vm.RemoteCommand('curl %s -L -o %s/%s' % (
+        NETPERF_URL, INSTALL_DIR, NETPERF_TAR))
 
 
 def YumInstall(vm):

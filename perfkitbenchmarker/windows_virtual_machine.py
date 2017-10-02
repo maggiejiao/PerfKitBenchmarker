@@ -165,6 +165,17 @@ class WindowsMixin(virtual_machine.BaseOsMixin):
     self.RemoteCommand('mkdir %s' % self.temp_dir)
     self.DisableGuestFirewall()
 
+  def _Reboot(self):
+    """OS-specific implementation of reboot command"""
+    self.RemoteCommand('shutdown -t 0 -r -f', ignore_failure=True)
+
+  def _AfterReboot(self):
+    """Performs any OS-specific setup on the VM following reboot.
+
+    This will be called after every call to Reboot().
+    """
+    pass
+
   def Install(self, package_name):
     """Installs a PerfKit package on the VM."""
     if not self.install_packages:
@@ -205,6 +216,10 @@ class WindowsMixin(virtual_machine.BaseOsMixin):
     # In the case that there are multiple Win32_processor instances, the result
     # of this command can be a string like '4  4  '.
     return sum(int(i) for i in stdout.split())
+
+  def _GetTotalFreeMemoryKb(self):
+    """Returns the amount of free physical memory on the VM in Kilobytes."""
+    raise NotImplementedError()
 
   def _GetTotalMemoryKb(self):
     """Returns the amount of physical memory on the VM in Kilobytes.

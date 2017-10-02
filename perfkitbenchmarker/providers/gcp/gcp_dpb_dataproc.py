@@ -24,15 +24,25 @@ import logging
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import providers
 from perfkitbenchmarker import dpb_service
+from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import util
 
-
 FLAGS = flags.FLAGS
+flags.DEFINE_string('dpb_dataproc_image_version', None,
+                    'The image version to use for the cluster.')
+flags.DEFINE_integer('dpb_dataproc_distcp_num_maps', None,
+                     'Number of maps to copy data.')
 
 GCP_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
 
 SPARK_SAMPLE_LOCATION = ('file:///usr/lib/spark/examples/jars/'
                          'spark-examples.jar')
+
+TESTDFSIO_JAR_LOCATION = ('file:///usr/lib/hadoop-mapreduce/'
+                          'hadoop-mapreduce-client-jobclient.jar')
+
+TESTDFSIO_PROGRAM = 'TestDFSIO'
+
 
 
 class GcpDpbDataproc(dpb_service.BaseDpbService):
@@ -49,6 +59,7 @@ class GcpDpbDataproc(dpb_service.BaseDpbService):
   def __init__(self, dpb_service_spec):
     super(GcpDpbDataproc, self).__init__(dpb_service_spec)
     self.project = None
+    self.dpb_dataproc_image_version = FLAGS.dpb_dataproc_image_version
 
   @staticmethod
   def _GetStats(stdout):
@@ -72,6 +83,11 @@ class GcpDpbDataproc(dpb_service.BaseDpbService):
       stats[dpb_service.WAITING] = (
           (start_time - pending_time).total_seconds())
     return stats
+
+  @staticmethod
+  def CheckPrerequisites(benchmark_config):
+    del benchmark_config  # Unused
+    pass
 
   def _Create(self):
     """Creates the cluster."""
@@ -105,25 +121,44 @@ class GcpDpbDataproc(dpb_service.BaseDpbService):
       if self.spec.worker_group.vm_spec.num_local_ssds:
         self._AddToCmd(cmd, 'num-{0}-local-ssds'.format(role),
                        self.spec.worker_group.vm_spec.num_local_ssds)
+
+    self.append_region(cmd, True)
+
+    if self.dpb_dataproc_image_version:
+      cmd.flags['image-version'] = self.dpb_dataproc_image_version
+
     # TODO(saksena): Retrieve the cluster create time and hold in a var
     cmd.Issue()
+
+  def append_region(self, cmd, append_zone=False):
+    if FLAGS.zones:
+      zone = FLAGS.zones[0]
+      region = zone.rsplit('-', 1)[0]
+      cmd.flags['region'] = region
+      if append_zone:
+        cmd.flags['zone'] = zone
 
   def _Delete(self):
     """Deletes the cluster."""
     cmd = util.GcloudCommand(self, 'dataproc', 'clusters', 'delete',
                              self.cluster_id)
+    self.append_region(cmd)
+
     cmd.Issue()
 
   def _Exists(self):
     """Check to see whether the cluster exists."""
     cmd = util.GcloudCommand(self, 'dataproc', 'clusters', 'describe',
                              self.cluster_id)
+    self.append_region(cmd)
+
     _, _, retcode = cmd.Issue()
     return retcode == 0
 
   def SubmitJob(self, jarfile, classname, job_poll_interval=None,
                 job_arguments=None, job_stdout_file=None,
                 job_type=None):
+    """See base class."""
     cmd = util.GcloudCommand(self, 'dataproc', 'jobs', 'submit', job_type)
     cmd.flags['cluster'] = self.cluster_id
 
@@ -132,6 +167,8 @@ class GcpDpbDataproc(dpb_service.BaseDpbService):
       cmd.flags['class'] = classname
     else:
       cmd.flags['jar'] = jarfile
+
+    self.append_region(cmd)
 
     # Dataproc gives as stdout an object describing job execution.
     # Its stderr contains a mix of the stderr of the job, and the
@@ -156,3 +193,99 @@ class GcpDpbDataproc(dpb_service.BaseDpbService):
   def _AddToCmd(self, cmd, cmd_property, cmd_value):
     flag_name = cmd_property
     cmd.flags[flag_name] = cmd_value
+
+  def CreateBucket(self, source_bucket):
+    mb_command = ['gsutil', 'mb']
+
+    if FLAGS.zones:
+      zone = FLAGS.zones[0]
+      region = zone.rsplit('-', 1)[0]
+      mb_command.extend(['-c', 'regional', '-l', region])
+
+    mb_command.append(source_bucket)
+    vm_util.IssueCommand(mb_command)
+
+
+  def generate_data(self, source_dir, udpate_default_fs, num_files, size_file):
+    """Method to generate data using a distributed job on the cluster."""
+    cmd = util.GcloudCommand(self, 'dataproc', 'jobs', 'submit', 'hadoop')
+    cmd.flags['cluster'] = self.cluster_id
+    cmd.flags['jar'] = TESTDFSIO_JAR_LOCATION
+
+    self.append_region(cmd)
+
+    job_arguments = [TESTDFSIO_PROGRAM]
+    if udpate_default_fs:
+      job_arguments.append('-Dfs.default.name={}'.format(source_dir))
+    job_arguments.append('-Dtest.build.data={}'.format(source_dir))
+    job_arguments.extend(['-write', '-nrFiles', str(num_files), '-fileSize',
+                          str(size_file)])
+    cmd.additional_flags = ['--'] + job_arguments
+    stdout, stderr, retcode = cmd.Issue(timeout=None)
+    return {dpb_service.SUCCESS: retcode == 0}
+
+  def read_data(self, source_dir, udpate_default_fs, num_files, size_file):
+    """Method to read data using a distributed job on the cluster."""
+    cmd = util.GcloudCommand(self, 'dataproc', 'jobs', 'submit', 'hadoop')
+    cmd.flags['cluster'] = self.cluster_id
+    cmd.flags['jar'] = TESTDFSIO_JAR_LOCATION
+
+    self.append_region(cmd)
+
+    job_arguments = [TESTDFSIO_PROGRAM]
+    if udpate_default_fs:
+      job_arguments.append('-Dfs.default.name={}'.format(source_dir))
+    job_arguments.append('-Dtest.build.data={}'.format(source_dir))
+    job_arguments.extend(['-read', '-nrFiles', str(num_files), '-fileSize',
+                          str(size_file)])
+    cmd.additional_flags = ['--'] + job_arguments
+    stdout, stderr, retcode = cmd.Issue(timeout=None)
+    return {dpb_service.SUCCESS: retcode == 0}
+
+
+  def distributed_copy(self, source_location, destination_location):
+    """Method to copy data using a distributed job on the cluster."""
+    cmd = util.GcloudCommand(self, 'dataproc', 'jobs', 'submit', 'hadoop')
+    cmd.flags['cluster'] = self.cluster_id
+    cmd.flags['class'] = 'org.apache.hadoop.tools.DistCp'
+
+    self.append_region(cmd)
+
+    job_arguments = (['-m={}'.format(FLAGS.dpb_dataproc_distcp_num_maps)]
+                     if FLAGS.dpb_dataproc_distcp_num_maps is not None else [])
+
+    job_arguments.extend([source_location, destination_location])
+
+    cmd.additional_flags = ['--'] + job_arguments
+    stdout, stderr, retcode = cmd.Issue(timeout=None)
+    return {dpb_service.SUCCESS: retcode == 0}
+
+
+  def cleanup_data(self, base_dir, udpate_default_fs):
+    """Method to cleanup data using a distributed job on the cluster."""
+    cmd = util.GcloudCommand(self, 'dataproc', 'jobs', 'submit', 'hadoop')
+    cmd.flags['cluster'] = self.cluster_id
+    cmd.flags['jar'] = TESTDFSIO_JAR_LOCATION
+
+    self.append_region(cmd)
+
+    job_arguments = [TESTDFSIO_PROGRAM]
+    if udpate_default_fs:
+      job_arguments.append('-Dfs.default.name={}'.format(base_dir))
+    job_arguments.append('-Dtest.build.data={}'.format(base_dir))
+    job_arguments.append('-clean')
+    cmd.additional_flags = ['--'] + job_arguments
+    stdout, stderr, retcode = cmd.Issue(timeout=None)
+    if retcode != 0:
+      return {dpb_service.SUCCESS: False}
+    if udpate_default_fs:
+      vm_util.IssueCommand(['gsutil', '-m', 'rm', '-r', base_dir])
+    return {dpb_service.SUCCESS: True}
+
+  def GetMetadata(self):
+    """Return a dictionary of the metadata for this cluster."""
+    basic_data = super(GcpDpbDataproc, self).GetMetadata()
+    if self.dpb_dataproc_image_version:
+      basic_data['dpb_service'] = ('dataproc_{}'.
+                                   format(self.dpb_dataproc_image_version))
+    return basic_data

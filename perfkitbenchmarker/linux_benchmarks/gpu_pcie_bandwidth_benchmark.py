@@ -11,8 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
 """Runs NVIDIA's CUDA PCI-E bandwidth test
       (https://developer.nvidia.com/cuda-code-samples)
 """
@@ -21,51 +19,74 @@ import numpy
 import re
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import flags
+from perfkitbenchmarker import flag_util
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import regex_util
 from perfkitbenchmarker.linux_packages import cuda_toolkit_8
 
+DEFAULT_RANGE_START = 1 << 26  # 64 MB
+DEFAULT_RANGE_STEP = 1 << 26  # 64 MB
+DEFAULT_RANGE_END = 1 << 30  # 1 GB
 
-flags.DEFINE_integer('gpu_pcie_bandwidth_iterations', 30,
-                     'number of iterations to run',
-                     lower_bound=1)
+flags.DEFINE_integer(
+    'gpu_pcie_bandwidth_iterations',
+    30,
+    'number of iterations to run',
+    lower_bound=1)
 
+flags.DEFINE_enum('gpu_pcie_bandwidth_mode', 'quick', ['quick', 'range'],
+                  'bandwidth test mode to use. '
+                  'If range is selected, provide desired range '
+                  'in flag gpu_pcie_bandwidth_transfer_sizes. '
+                  'Additionally, if range is selected, the resulting '
+                  'bandwidth will be averaged over all provided transfer '
+                  'sizes.')
+
+flag_util.DEFINE_integerlist(
+    'gpu_pcie_bandwidth_transfer_sizes',
+    flag_util.IntegerList(
+        [DEFAULT_RANGE_START, DEFAULT_RANGE_END,
+         DEFAULT_RANGE_STEP]), 'range of transfer sizes to use in bytes. '
+    'Only used if gpu_pcie_bandwidth_mode is set to range')
 
 FLAGS = flags.FLAGS
 
 BENCHMARK_NAME = 'gpu_pcie_bandwidth'
-# Note on the config: gce_migrate_on_maintenance must be false,
-# because GCE does not support migrating the user's GPU state.
 BENCHMARK_CONFIG = """
 gpu_pcie_bandwidth:
   description: Runs NVIDIA's CUDA bandwidth test.
-  flags:
-    gce_migrate_on_maintenance: False
   vm_groups:
     default:
       vm_spec:
         GCP:
           image: ubuntu-1604-xenial-v20161115
           image_project: ubuntu-os-cloud
-          machine_type: n1-standard-4-k80x1
+          machine_type: n1-standard-4
+          gpu_type: k80
+          gpu_count: 1
           zone: us-east1-d
           boot_disk_size: 200
         AWS:
-          image: ami-a9d276c9
+          image: ami-d15a75c7
           machine_type: p2.xlarge
-          zone: us-west-2b
+          zone: us-east-1
           boot_disk_size: 200
         Azure:
           image: Canonical:UbuntuServer:16.04.0-LTS:latest
           machine_type: Standard_NC6
           zone: eastus
 """
-BENCHMARK_METRICS = ['Host to device bandwidth',
-                     'Device to host bandwidth',
-                     'Device to device bandwidth']
+BENCHMARK_METRICS = [
+    'Host to device bandwidth', 'Device to host bandwidth',
+    'Device to device bandwidth'
+]
 
 EXTRACT_BANDWIDTH_TEST_RESULTS_REGEX = r'\d+\s+(\d+\.?\d*)'
 EXTRACT_DEVICE_INFO_REGEX = r'Device\s*(\d):\s*(.*$)'
+
+
+class InvalidBandwidthTestOutputFormat(Exception):
+  pass
 
 
 def GetConfig(user_config):
@@ -104,10 +125,51 @@ def _ParseDeviceInfo(test_output):
     A dictionary mapping the device number to its name, for every
     device available on the system.
   """
-  matches = regex_util.ExtractAllMatches(EXTRACT_DEVICE_INFO_REGEX,
-                                         test_output, re.MULTILINE)
+  matches = regex_util.ExtractAllMatches(EXTRACT_DEVICE_INFO_REGEX, test_output,
+                                         re.MULTILINE)
   devices = {str(i[0]): str(i[1]) for i in matches}
   return devices
+
+
+def _AverageResultsForSection(lines, results_section_header_index):
+  """Return the average bandwidth for a specific section of results
+
+  Args:
+    lines: output of bandwidthTest, split by lines and stripped of whitespace
+    results_section_header_index: line number of results section header.
+      The actual results, in MB/s, should begin three lines after the header.
+
+  Returns:
+    average bandwidth, in MB/s, for the section beginning at
+      results_section_header_index
+  """
+  RESULTS_OFFSET_FROM_HEADER = 3
+  results = []
+  for line in lines[results_section_header_index + RESULTS_OFFSET_FROM_HEADER:]:
+    if not line:
+      break  # done with this section if line is empty
+    results.append(float(line.split()[1]))
+  return numpy.mean(results)
+
+
+def _FindIndexOfLineThatStartsWith(lines, str):
+  """Return the index of the line that startswith str.
+
+  Args:
+    lines: iterable
+    str: predicate to find in lines
+
+  Returns:
+    first index of the element in lines that startswith str
+
+  Raises:
+    InvalidBandwidthTestOutputFormat if str is not found
+  """
+  for idx, line in enumerate(lines):
+    if line.startswith(str):
+      return idx
+  raise InvalidBandwidthTestOutputFormat(
+      'Unable to find {0} in bandwidthTest output'.format(str))
 
 
 def _ParseOutputFromSingleIteration(test_output):
@@ -125,11 +187,26 @@ def _ParseOutputFromSingleIteration(test_output):
     All units are in MB/s, as these are the units guaranteed to be output
     by the test.
   """
-  matches = regex_util.ExtractAllMatches(EXTRACT_BANDWIDTH_TEST_RESULTS_REGEX,
-                                         test_output)
-  results = {}
-  for i, metric in enumerate(BENCHMARK_METRICS):
-    results[metric] = float(matches[i])
+  lines = [line.strip() for line in test_output.splitlines()]
+  host_to_device_results_start = _FindIndexOfLineThatStartsWith(
+      lines, 'Host to Device Bandwidth')
+  device_to_host_results_start = _FindIndexOfLineThatStartsWith(
+      lines, 'Device to Host Bandwidth')
+  device_to_device_results_start = _FindIndexOfLineThatStartsWith(
+      lines, 'Device to Device Bandwidth')
+
+  host_to_device_mean = _AverageResultsForSection(lines,
+                                                  host_to_device_results_start)
+  device_to_host_mean = _AverageResultsForSection(lines,
+                                                  device_to_host_results_start)
+  device_to_device_mean = _AverageResultsForSection(
+      lines, device_to_device_results_start)
+
+  results = {
+      'Host to device bandwidth': host_to_device_mean,
+      'Device to host bandwidth': device_to_host_mean,
+      'Device to device bandwidth': device_to_device_mean,
+  }
   return results
 
 
@@ -163,17 +240,18 @@ def _CalculateMetricsOverAllIterations(result_dicts, metadata={}):
     for idx, measurement in enumerate(sequence):
       metadata_copy = metadata.copy()
       metadata_copy['iteration'] = idx
-      samples.append(sample.Sample(
-          metric, measurement, 'MB/s', metadata_copy))
+      samples.append(sample.Sample(metric, measurement, 'MB/s', metadata_copy))
 
-    samples.append(sample.Sample(
-        metric + ', min', min(sequence), 'MB/s', metadata))
-    samples.append(sample.Sample(
-        metric + ', max', max(sequence), 'MB/s', metadata))
-    samples.append(sample.Sample(
-        metric + ', mean', numpy.mean(sequence), 'MB/s', metadata))
-    samples.append(sample.Sample(
-        metric + ', stddev', numpy.std(sequence), 'MB/s', metadata))
+    samples.append(
+        sample.Sample(metric + ', min', min(sequence), 'MB/s', metadata))
+    samples.append(
+        sample.Sample(metric + ', max', max(sequence), 'MB/s', metadata))
+    samples.append(
+        sample.Sample(metric + ', mean', numpy.mean(sequence), 'MB/s',
+                      metadata))
+    samples.append(
+        sample.Sample(metric + ', stddev', numpy.std(sequence), 'MB/s',
+                      metadata))
   return samples
 
 
@@ -193,14 +271,25 @@ def Run(benchmark_spec):
   # clock speed without having to re-prepare the VM.
   cuda_toolkit_8.SetAndConfirmGpuClocks(vm)
   num_iterations = FLAGS.gpu_pcie_bandwidth_iterations
+  mode = FLAGS.gpu_pcie_bandwidth_mode
+  transfer_size_range = FLAGS.gpu_pcie_bandwidth_transfer_sizes
   raw_results = []
   metadata = {}
+  metadata.update(cuda_toolkit_8.GetMetadata(vm))
   metadata['num_iterations'] = num_iterations
-  metadata['num_gpus'] = cuda_toolkit_8.QueryNumberOfGpus(vm)
-  metadata['memory_clock_MHz'] = FLAGS.gpu_clock_speeds[0]
-  metadata['graphics_clock_MHz'] = FLAGS.gpu_clock_speeds[1]
-  run_command = ('%s/extras/demo_suite/bandwidthTest --device=all'
-                 % cuda_toolkit_8.CUDA_TOOLKIT_INSTALL_DIR)
+  metadata['mode'] = mode
+  if mode == 'range':
+    metadata['range_start'] = transfer_size_range[0]
+    metadata['range_stop'] = transfer_size_range[1]
+    metadata['range_step'] = transfer_size_range[2]
+
+  run_command = ('%s/extras/demo_suite/bandwidthTest --device=all' %
+                 cuda_toolkit_8.CUDA_TOOLKIT_INSTALL_DIR)
+  if mode == 'range':
+    run_command += (' --mode=range --start={0} --end={1} --increment={2}'
+                    .format(transfer_size_range[0], transfer_size_range[1],
+                            transfer_size_range[2]))
+
   for i in range(num_iterations):
     stdout, _ = vm.RemoteCommand(run_command, should_log=True)
     raw_results.append(_ParseOutputFromSingleIteration(stdout))

@@ -38,6 +38,10 @@ _GCP_AWS_VM_CONFIG = {'GCP': {'machine_type': 'n1-standard-1'},
 _GCP_AWS_DISK_CONFIG = {'GCP': {}, 'AWS': {}}
 
 
+def _GetFlagDict(flag_values):
+  return {name: flag_values[name] for name in flag_values}
+
+
 class FlagsDecoderTestCase(unittest.TestCase):
 
   def setUp(self):
@@ -53,7 +57,7 @@ class FlagsDecoderTestCase(unittest.TestCase):
     self.assertEqual(len(result), 1)
     self.assertEqual(result['test_flag'].value, expected_flag_value)
     self.assertEqual(result['test_flag'].present, expected_flag_present)
-    self.assertIsNot(result, self._flag_values.FlagDict())
+    self.assertIsNot(result, _GetFlagDict(self._flag_values))
 
   def testNone(self):
     result = self._decoder.Decode(None, _COMPONENT, self._flag_values)
@@ -173,6 +177,22 @@ class StaticVmDecoderTestCase(unittest.TestCase):
     self.assertIsInstance(result, static_virtual_machine.StaticVmSpec)
     self.assertEqual(result.ssh_port, 111)
 
+  def testVmSpecFlag(self):
+    flags = mock_flags.MockFlags()
+    flags['install_packages'].value = False
+    flags['install_packages'].present = True
+    result = self._decoder.Decode({}, _COMPONENT, flags)
+    self.assertFalse(result.install_packages)
+
+  def testDiskSpecFlag(self):
+    flags = mock_flags.MockFlags()
+    flags['scratch_dir'].value = '/path/from/flag'
+    flags['scratch_dir'].present = True
+    result = self._decoder.Decode(
+        {'disk_specs': [{'mount_point': '/path/from/spec'}]},
+        _COMPONENT, flags)
+    self.assertEqual(result.disk_specs[0].mount_point, '/path/from/flag')
+
 
 class StaticVmListDecoderTestCase(unittest.TestCase):
 
@@ -233,12 +253,6 @@ class VmGroupSpecTestCase(unittest.TestCase):
         'one of the following: {0}.'.format(', '.join(providers.VALID_CLOUDS))))
 
   def testInvalidDiskCount(self):
-    self._kwargs['disk_count'] = None
-    with self.assertRaises(errors.Config.InvalidValue) as cm:
-      self._spec_class(_COMPONENT, **self._kwargs)
-    self.assertEqual(str(cm.exception), (
-        'Invalid test_component.disk_count value: "None" (of type "NoneType"). '
-        'Value must be one of the following types: int.'))
     self._kwargs['disk_count'] = -1
     with self.assertRaises(errors.Config.InvalidValue) as cm:
       self._spec_class(_COMPONENT, **self._kwargs)
@@ -433,10 +447,7 @@ class BenchmarkConfigSpecTestCase(unittest.TestCase):
                               **self._kwargs)
     self.assertIsInstance(result, benchmark_config_spec.BenchmarkConfigSpec)
     self.assertEqual(result.description, 'Test description.')
-    self.assertIsInstance(result.flags, dict)
-    self.assertEqual(sorted(result.flags.keys()),
-                     sorted(flags.FLAGS.FlagDict().keys()))
-    self.assertIsNot(result.flags, flags.FLAGS.FlagDict())
+    self.assertIsNot(result.flags, _GetFlagDict(flags.FLAGS))
     self.assertIsInstance(result.vm_groups, dict)
     self.assertEqual(len(result.vm_groups), 1)
     self.assertIsInstance(result.vm_groups['default'],
@@ -479,10 +490,8 @@ class BenchmarkConfigSpecTestCase(unittest.TestCase):
     self.assertIsInstance(result, benchmark_config_spec.BenchmarkConfigSpec)
     self.assertEqual(result.description, 'Test description.')
     self.assertIsInstance(result.flags, dict)
-    self.assertEqual(sorted(result.flags.keys()),
-                     sorted(flags.FLAGS.FlagDict().keys()))
-    self.assertIsNot(result.flags, flags.FLAGS.FlagDict())
-    self.assertEqual(result.flags['cloud'].value, 'AWS')
+    self.assertIsNot(result.flags, _GetFlagDict(flags.FLAGS))
+    self.assertEqual(result.flags['cloud'], 'AWS')
     self.assertEqual(flags.FLAGS['cloud'].value, 'GCP')
     self.assertIsInstance(result.vm_groups, dict)
     self.assertEqual(len(result.vm_groups), 1)

@@ -54,13 +54,14 @@ from perfkitbenchmarker import events
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
+from perfkitbenchmarker.linux_packages import INSTALL_DIR
 
 FLAGS = flags.FLAGS
 
 YCSB_VERSION = '0.9.0'
 YCSB_TAR_URL = ('https://github.com/brianfrankcooper/YCSB/releases/'
                 'download/{0}/ycsb-{0}.tar.gz').format(YCSB_VERSION)
-YCSB_DIR = posixpath.join(vm_util.VM_TMP_DIR, 'ycsb')
+YCSB_DIR = posixpath.join(INSTALL_DIR, 'ycsb')
 YCSB_EXE = posixpath.join(YCSB_DIR, 'bin', 'ycsb')
 
 _DEFAULT_PERCENTILES = 50, 75, 90, 95, 99, 99.9
@@ -74,6 +75,9 @@ AGGREGATE_OPERATORS = {
     'Return=-1': operator.add,
     'Return=-2': operator.add,
     'Return=-3': operator.add,
+    'Return=OK': operator.add,
+    'Return=ERROR': operator.add,
+    'LatencyVariance(ms)': None,
     'AverageLatency(ms)': None,  # Requires both average and # of ops.
     'Throughput(ops/sec)': operator.add,
     '95thPercentileLatency(ms)': None,  # Calculated across clients.
@@ -261,7 +265,7 @@ def ParseResults(ycsb_result_string, data_type='histogram'):
       # Drop ">" from ">1000"
       if name.startswith('>'):
         name = name[1:]
-      val = float(val) if '.' in val else int(val)
+      val = float(val) if '.' in val or 'nan' in val.lower() else int(val)
       if name.isdigit():
         if val:
           op_result[data_type].append((int(name), val))
@@ -584,7 +588,7 @@ class YCSBExecutor(object):
     """
     results = []
 
-    remote_path = posixpath.join(vm_util.VM_TMP_DIR,
+    remote_path = posixpath.join(INSTALL_DIR,
                                  os.path.basename(workload_file))
     kwargs.setdefault('threads', self._default_preload_threads)
     kwargs.setdefault('recordcount', FLAGS.ycsb_record_count)
@@ -719,7 +723,7 @@ class YCSBExecutor(object):
       if FLAGS.ycsb_timelimit:
         parameters['maxexecutiontime'] = FLAGS.ycsb_timelimit
       parameters.update(kwargs)
-      remote_path = posixpath.join(vm_util.VM_TMP_DIR,
+      remote_path = posixpath.join(INSTALL_DIR,
                                    os.path.basename(workload_file))
 
       with open(workload_file) as fp:
@@ -762,6 +766,27 @@ class YCSBExecutor(object):
 
     return all_results
 
+  def Load(self, vms, workloads=None, load_kwargs=None):
+    """Load data using YCSB."""
+    workloads = workloads or _GetWorkloadFileList()
+    load_samples = []
+    assert workloads, 'no workloads'
+    if FLAGS.ycsb_reload_database or not self.loaded:
+        load_samples += list(self._LoadThreaded(
+            vms, workloads[0], **(load_kwargs or {})))
+        self.loaded = True
+    if FLAGS.ycsb_load_samples:
+      return load_samples
+    else:
+      return []
+
+  def Run(self, vms, workloads=None, run_kwargs=None):
+    """Runs each workload/client count combination."""
+    workloads = workloads or _GetWorkloadFileList()
+    assert workloads, 'no workloads'
+    return list(self.RunStaircaseLoads(vms, workloads,
+                                       **(run_kwargs or {})))
+
   def LoadAndRun(self, vms, workloads=None, load_kwargs=None, run_kwargs=None):
     """Load data using YCSB, then run each workload/client count combination.
 
@@ -781,16 +806,6 @@ class YCSBExecutor(object):
     Returns:
       List of sample.Sample objects.
     """
-    workloads = workloads or _GetWorkloadFileList()
-    load_samples = []
-    assert workloads, 'no workloads'
-    if FLAGS.ycsb_reload_database or not self.loaded:
-        load_samples += list(self._LoadThreaded(
-            vms, workloads[0], **(load_kwargs or {})))
-        self.loaded = True
-    run_samples = list(self.RunStaircaseLoads(vms, workloads,
-                                              **(run_kwargs or {})))
-    if FLAGS.ycsb_load_samples:
-      return load_samples + run_samples
-    else:
-      return run_samples
+    load_samples = self.Load(vms, workloads=workloads, load_kwargs=load_kwargs)
+    run_samples = self.Run(vms, workloads=workloads, run_kwargs=run_kwargs)
+    return load_samples + run_samples

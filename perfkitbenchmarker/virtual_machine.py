@@ -41,6 +41,10 @@ _VM_SPEC_REGISTRY = {}
 _VM_REGISTRY = {}
 
 
+flags.DEFINE_boolean(
+    'dedicated_hosts', False,
+    'If True, use hosts that only have VMs from the same '
+    'benchmark running on them.')
 flags.DEFINE_list('vm_metadata', [], 'Metadata to add to the vm '
                   'via the provider\'s AddMetadata function. It expects'
                   'key:value pairs')
@@ -134,6 +138,8 @@ class BaseVmSpec(spec.BaseSpec):
     if flag_values['background_network_ip_type'].present:
       config_values['background_network_ip_type'] = (
           flag_values.background_network_ip_type)
+    if flag_values['dedicated_hosts'].present:
+      config_values['use_dedicated_host'] = flag_values.dedicated_hosts
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -156,6 +162,8 @@ class BaseVmSpec(spec.BaseSpec):
                                                          'default': None}),
         'zone': (option_decoders.StringDecoder, {'none_ok': True,
                                                  'default': None}),
+        'use_dedicated_host': (option_decoders.BooleanDecoder,
+                               {'default': False}),
         'background_network_mbits_per_sec': (option_decoders.IntDecoder, {
             'none_ok': True, 'default': None}),
         'background_network_ip_type': (option_decoders.EnumDecoder, {
@@ -236,6 +244,7 @@ class BaseVirtualMachine(resource.BaseResource):
     self.background_network_mbits_per_sec = (
         vm_spec.background_network_mbits_per_sec)
     self.background_network_ip_type = vm_spec.background_network_ip_type
+    self.use_dedicated_host = None
 
     self.network = None
     self.firewall = None
@@ -278,17 +287,14 @@ class BaseVirtualMachine(resource.BaseResource):
               disk_num, len(self.scratch_disks)))
     return self.scratch_disks[disk_num].mount_point
 
-  def GetLocalDisks(self):
-    # TODO(ehankland) This method should be removed as soon as raw/unmounted
-    # scratch disks are supported in a different way. Only the Aerospike
-    # benchmark currently accesses disks using this method.
-    """Returns a list of local disks on the VM."""
-    return []
-
   def AllowPort(self, start_port, end_port=None):
     """Opens the port on the firewall corresponding to the VM if one exists."""
     if self.firewall:
-      self.firewall.AllowPort(self, start_port, end_port)
+      if end_port:
+          for port in range(start_port, end_port + 1):
+              self.firewall.AllowPort(self, port)
+      else:
+          self.firewall.AllowPort(self, start_port)
 
   def AllowRemoteAccessPorts(self):
     """Allow all ports in self.remote_access_ports."""
@@ -319,7 +325,13 @@ class BaseVirtualMachine(resource.BaseResource):
     result = {}
     if self.machine_type is not None:
       result['machine_type'] = self.machine_type
+    if self.use_dedicated_host is not None:
+      result['dedicated_host'] = self.use_dedicated_host
     return result
+
+  def SimulateMaintenanceEvent(self):
+    """Simulates a maintenance event on the VM."""
+    raise NotImplementedError()
 
 
 class BaseOsMixin(object):
@@ -390,6 +402,24 @@ class BaseOsMixin(object):
       return False
     except:
       raise
+
+  def Reboot(self):
+    """Reboot the VM."""
+    self._Reboot()
+    self.WaitForBootCompletion()
+    self._AfterReboot()
+
+  @abc.abstractmethod
+  def _Reboot(self):
+    """OS-specific implementation of reboot command"""
+    raise NotImplementedError()
+
+  def _AfterReboot(self):
+    """Performs any OS-specific setup on the VM following reboot.
+
+    This will be called after every call to Reboot().
+    """
+    pass
 
   @abc.abstractmethod
   def RemoteCopy(self, file_path, remote_path='', copy_to=True):
@@ -553,6 +583,15 @@ class BaseOsMixin(object):
     raise NotImplementedError()
 
   @property
+  def total_free_memory_kb(self):
+    """Gets the amount of free memory on the VM.
+
+    Returns:
+      The number of kilobytes of memory on the VM.
+    """
+    return self._GetTotalFreeMemoryKb()
+
+  @property
   def total_memory_kb(self):
     """Gets the amount of memory on the VM.
 
@@ -562,6 +601,11 @@ class BaseOsMixin(object):
     if not self._total_memory_kb:
       self._total_memory_kb = self._GetTotalMemoryKb()
     return self._total_memory_kb
+
+  @abc.abstractmethod
+  def _GetTotalFreeMemoryKb(self):
+    """Returns the amount of free physical memory on the VM in Kilobytes."""
+    raise NotImplementedError()
 
   @abc.abstractmethod
   def _GetTotalMemoryKb(self):
@@ -616,3 +660,13 @@ class BaseOsMixin(object):
         if self.OS_TYPE in workload.EXCLUDED_OS_TYPES:
           raise NotImplementedError()
         workload.Prepare(self)
+
+  @abc.abstractmethod
+  def SetReadAhead(self, num_sectors, devices):
+    """Set read-ahead value for block devices.
+
+    Args:
+      num_sectors: int. Number of sectors of read ahead.
+      devices: list of strings. A list of block devices.
+    """
+    raise NotImplementedError()

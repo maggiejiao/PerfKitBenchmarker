@@ -18,18 +18,11 @@ flags.DEFINE_string('openstack_cli_path',
                     default='openstack',
                     help='The path to the OpenStack CLI binary.')
 
-flags.DEFINE_string('openstack_nova_path',
-                    default='nova',
-                    help='The path to the Nova CLI binary.')
-
-flags.DEFINE_string('openstack_neutron_path',
-                    default='neutron',
-                    help='The path to the Neutron CLI binary.')
-
-flags.DEFINE_string('openstack_additional_flags',
-                    default=[],
-                    help='Additional flags to pass to every OpenStack CLI '
-                         'command. See "openstack --help" for more.')
+flags.DEFINE_list('openstack_additional_flags',
+                  default=[],
+                  help='Additional comma separated flags to pass to every '
+                       'OpenStack CLI command. See "openstack --help" for '
+                       'more.')
 
 flags.DEFINE_string('openstack_public_network', None,
                     '(DEPRECATED: Use openstack_floating_ip_pool) '
@@ -62,7 +55,12 @@ flags.DEFINE_boolean('openstack_boot_from_volume', False,
                      'Boot from volume instead of an image')
 
 flags.DEFINE_integer('openstack_volume_size', None,
-                     'Size of the volume (GB)')
+                     '(DEPRECATED: Use data_disk_size) '
+                     'Size of the volume (GB).')
+
+flags.DEFINE_string('openstack_volume_type',
+                    default=None,
+                    help='Optional Cinder volume type to use.')
 
 flags.DEFINE_string('openstack_image_username', 'ubuntu',
                     'Ssh username for cloud image')

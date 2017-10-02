@@ -54,7 +54,7 @@ EPEL7_RPM = ('http://dl.fedoraproject.org/pub/epel/'
 UPDATE_RETRIES = 5
 SSH_RETRIES = 10
 DEFAULT_SSH_PORT = 22
-REMOTE_KEY_PATH = '.ssh/id_rsa'
+REMOTE_KEY_PATH = '~/.ssh/id_rsa'
 CONTAINER_MOUNT_DIR = '/mnt'
 CONTAINER_WORK_DIR = '/root'
 
@@ -107,6 +107,9 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
 
     self._remote_command_script_upload_lock = threading.Lock()
     self._has_remote_command_script = False
+
+  def _CreateVmTmpDir(self):
+        self.RemoteCommand('mkdir -p %s' % vm_util.VM_TMP_DIR)
 
   def _PushRobustCommandScripts(self):
     """Pushes the scripts required by RobustRemoteCommand to this VM.
@@ -163,12 +166,20 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
                                          wrapper_log)
     self.RemoteCommand(start_command)
 
-    wait_command = ['python', wait_path, '--stdout', stdout_file,
-                    '--stderr', stderr_file,
-                    '--status', status_file,
-                    '--delete']
-    try:
+    def _WaitForCommand():
+      wait_command = ['python', wait_path, '--status', status_file]
+      stdout = ''
+      while 'Command finished.' not in stdout:
+        stdout, _ = self.RemoteCommand(
+            ' '.join(wait_command), should_log=should_log)
+      wait_command.extend([
+          '--stdout', stdout_file,
+          '--stderr', stderr_file,
+          '--delete'])
       return self.RemoteCommand(' '.join(wait_command), should_log=should_log)
+
+    try:
+      return _WaitForCommand()
     except errors.VirtualMachine.RemoteCommandError:
       # In case the error was with the wrapper script itself, print the log.
       stdout, _ = self.RemoteCommand('cat %s' % wrapper_log, should_log=False)
@@ -208,13 +219,16 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
 
   def PrepareVMEnvironment(self):
     self.SetupProxy()
-    self.RemoteCommand('mkdir -p %s' % vm_util.VM_TMP_DIR)
+    self._CreateVmTmpDir()
     if FLAGS.setup_remote_firewall:
       self.SetupRemoteFirewall()
     if self.install_packages:
+      self.RemoteCommand('sudo mkdir -p %s' % linux_packages.INSTALL_DIR)
+      self.RemoteCommand('sudo chmod a+rwxt %s' % linux_packages.INSTALL_DIR)
       if self.is_static:
         self.SnapshotPackages()
       self.SetupPackageManager()
+      self.InstallPackages('python')
     self.SetFiles()
     self.DoSysctls()
     self.BurnCpu()
@@ -260,7 +274,7 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
     for package_name in self._installed_packages:
       self.Uninstall(package_name)
     self.RestorePackages()
-    self.RemoteCommand('rm -rf %s' % vm_util.VM_TMP_DIR)
+    self.RemoteCommand('sudo rm -rf %s' % linux_packages.INSTALL_DIR)
 
   def GetPathToConfig(self, package_name):
     """Returns the path to the config file for PerfKit packages.
@@ -406,6 +420,17 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
 
     return stdout, stderr
 
+  def _Reboot(self):
+    """OS-specific implementation of reboot command"""
+    self.RemoteCommand('sudo reboot', ignore_failure=True)
+
+  def _AfterReboot(self):
+    """Performs any OS-specific setup on the VM following reboot.
+
+    This will be called after every call to Reboot().
+    """
+    self._CreateVmTmpDir()
+
   def MoveFile(self, target, source_path, remote_path=''):
     self.MoveHostFile(target, source_path, remote_path)
 
@@ -436,12 +461,8 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
     if not self.is_static and not self.has_private_key:
       self.RemoteHostCopy(vm_util.GetPrivateKeyPath(),
                           REMOTE_KEY_PATH)
-      with vm_util.NamedTemporaryFile() as tf:
-        tf.write('Host *\n')
-        tf.write('  StrictHostKeyChecking no\n')
-        tf.close()
-        self.PushFile(tf.name, '~/.ssh/config')
-
+      self.RemoteCommand(
+          'echo "Host *\n  StrictHostKeyChecking no\n" > ~/.ssh/config')
       self.has_private_key = True
 
   def TestAuthentication(self, peer):
@@ -502,6 +523,29 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
     """
     stdout, _ = self.RemoteCommand(
         'cat /proc/cpuinfo | grep processor | wc -l')
+    return int(stdout)
+
+  def _GetTotalFreeMemoryKb(self):
+    """Calculate amount of free memory in KB of the given vm.
+
+    Free memory is calculated as sum of free, cached, and buffers
+    as output from /proc/meminfo.
+
+    Args:
+      vm: vm to check
+
+    Returns:
+      free memory on the vm in KB
+    """
+    stdout, _ = self.RemoteCommand("""
+      awk '
+        BEGIN      {total =0}
+        /MemFree:/ {total += $2}
+        /Cached:/  {total += $2}
+        /Buffers:/ {total += $2}
+        END        {print total}
+        ' /proc/meminfo
+        """)
     return int(stdout)
 
   def _GetTotalMemoryKb(self):
@@ -589,6 +633,17 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
         time.sleep(end_time - time.time())
       self.RemoteCommand('pkill -9 sysbench')
 
+  def SetReadAhead(self, num_sectors, devices):
+    """Set read-ahead value for block devices.
+
+    Args:
+      num_sectors: int. Number of sectors of read ahead.
+      devices: list of strings. A list of block devices.
+    """
+    self.RemoteCommand(
+        'sudo blockdev --setra {0} {1}; sudo blockdev --setfra {0} {1};'.format(
+            num_sectors, ' '.join(devices)))
+
 
 class RhelMixin(BaseLinuxMixin):
   """Class holding RHEL specific VM methods and attributes."""
@@ -630,14 +685,15 @@ class RhelMixin(BaseLinuxMixin):
 
   def SnapshotPackages(self):
     """Grabs a snapshot of the currently installed packages."""
-    self.RemoteCommand('rpm -qa > %s/rpm_package_list' % vm_util.VM_TMP_DIR)
+    self.RemoteCommand('rpm -qa > %s/rpm_package_list'
+                       % linux_packages.INSTALL_DIR)
 
   def RestorePackages(self):
     """Restores the currently installed packages to those snapshotted."""
     self.RemoteCommand(
         'rpm -qa | grep --fixed-strings --line-regexp --invert-match --file '
         '%s/rpm_package_list | xargs --no-run-if-empty sudo rpm -e' %
-        vm_util.VM_TMP_DIR,
+        linux_packages.INSTALL_DIR,
         ignore_failure=True)
 
   def HasPackage(self, package):
@@ -737,13 +793,15 @@ class DebianMixin(BaseLinuxMixin):
   def SnapshotPackages(self):
     """Grabs a snapshot of the currently installed packages."""
     self.RemoteCommand(
-        'dpkg --get-selections > %s/dpkg_selections' % vm_util.VM_TMP_DIR)
+        'dpkg --get-selections > %s/dpkg_selections'
+        % linux_packages.INSTALL_DIR)
 
   def RestorePackages(self):
     """Restores the currently installed packages to those snapshotted."""
     self.RemoteCommand('sudo dpkg --clear-selections')
     self.RemoteCommand(
-        'sudo dpkg --set-selections < %s/dpkg_selections' % vm_util.VM_TMP_DIR)
+        'sudo dpkg --set-selections < %s/dpkg_selections'
+        % linux_packages.INSTALL_DIR)
     self.RemoteCommand('sudo DEBIAN_FRONTEND=\'noninteractive\' '
                        'apt-get --purge -y dselect-upgrade')
 
@@ -755,6 +813,9 @@ class DebianMixin(BaseLinuxMixin):
   @vm_util.Retry()
   def InstallPackages(self, packages):
     """Installs packages using the apt package manager."""
+    if not self._apt_updated:
+      self.AptUpdate()
+      self._apt_updated = True
     try:
       install_command = ('sudo DEBIAN_FRONTEND=\'noninteractive\' '
                          '/usr/bin/apt-get -y install %s' % (packages))
@@ -856,6 +917,7 @@ class ContainerizedDebianMixin(DebianMixin):
   """
 
   OS_TYPE = os_types.UBUNTU_CONTAINER
+  BASE_DOCKER_IMAGE = 'ubuntu:trusty-20161006'
 
   def _CheckDockerExists(self):
     """Returns whether docker is installed or not."""
@@ -867,10 +929,17 @@ class ContainerizedDebianMixin(DebianMixin):
 
   def PrepareVMEnvironment(self):
     """Initializes docker before proceeding with preparation."""
-    self.RemoteHostCommand('mkdir -p %s' % vm_util.VM_TMP_DIR)
     if not self._CheckDockerExists():
       self.Install('docker')
+    # We need to explicitly create VM_TMP_DIR in the host because
+    # otherwise it will be implicitly created by Docker in InitDocker()
+    # (because of the -v option) and owned by root instead of perfkit,
+    # causing permission problems.
+    self.RemoteHostCommand('mkdir -p %s' % vm_util.VM_TMP_DIR)
     self.InitDocker()
+    # This will create the VM_TMP_DIR in the container.
+    # Has to be done after InitDocker() because it needs docker_id.
+    self._CreateVmTmpDir()
 
     # Python is needed for RobustRemoteCommands
     self.Install('python')
@@ -878,7 +947,6 @@ class ContainerizedDebianMixin(DebianMixin):
 
   def InitDocker(self):
     """Initializes the docker container daemon."""
-    self.CONTAINER_IMAGE = 'ubuntu:latest'
     init_docker_cmd = ['sudo docker run -d '
                        '--net=host '
                        '--workdir=%s '
@@ -887,7 +955,7 @@ class ContainerizedDebianMixin(DebianMixin):
                                       CONTAINER_MOUNT_DIR)]
     for sd in self.scratch_disks:
       init_docker_cmd.append('-v %s:%s ' % (sd.mount_point, sd.mount_point))
-    init_docker_cmd.append('%s sleep infinity ' % self.CONTAINER_IMAGE)
+    init_docker_cmd.append('%s sleep infinity ' % self.BASE_DOCKER_IMAGE)
     init_docker_cmd = ''.join(init_docker_cmd)
 
     resp, _ = self.RemoteHostCommand(init_docker_cmd)
@@ -917,11 +985,6 @@ class ContainerizedDebianMixin(DebianMixin):
     """
     # Escapes bash sequences
     command = command.replace("'", r"'\''")
-
-    # The base image, ubuntu-latest, doesn't have 'sudo'. Also 'sudo' is not
-    # needed because the container starts as root.
-    if command.startswith('sudo '):
-      command = command[5:]
 
     logging.info('Docker running: %s' % command)
     command = "sudo docker exec %s bash -c '%s'" % (self.docker_id, command)

@@ -27,11 +27,13 @@ import csv
 import io
 import json
 import logging
+import re
 
 from collections import Counter
 
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import data
+from perfkitbenchmarker import flag_util
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
@@ -49,13 +51,21 @@ flags.DEFINE_integer('netperf_test_length', 60,
 flags.DEFINE_bool('netperf_enable_histograms', True,
                   'Determines whether latency histograms are '
                   'collected/reported. Only for *RR benchmarks')
-flags.DEFINE_integer('netperf_num_streams', 1,
-                     'Number of netperf processes to run.')
+flag_util.DEFINE_integerlist('netperf_num_streams', flag_util.IntegerList([1]),
+                             'Number of netperf processes to run. Netperf '
+                             'will run once for each value in the list.')
+flags.DEFINE_integer('netperf_thinktime', 0,
+                     'Time in nanoseconds to do work for each request.')
+flags.DEFINE_integer('netperf_thinktime_array_size', 0,
+                     'The size of the array to traverse for thinktime.')
+flags.DEFINE_integer('netperf_thinktime_run_length', 0,
+                     'The number of contiguous numbers to sum at a time in the '
+                     'thinktime array.')
 
 ALL_BENCHMARKS = ['TCP_RR', 'TCP_CRR', 'TCP_STREAM', 'UDP_RR']
 flags.DEFINE_list('netperf_benchmarks', ALL_BENCHMARKS,
                   'The netperf benchmark(s) to run.')
-flags.RegisterValidator(
+flags.register_validator(
     'netperf_benchmarks',
     lambda benchmarks: benchmarks and set(benchmarks).issubset(ALL_BENCHMARKS))
 
@@ -83,6 +93,12 @@ REMOTE_SCRIPT = 'netperf_test.py'
 
 PERCENTILES = [50, 90, 99]
 
+# By default, Container-Optimized OS (COS) host firewall allows only
+# outgoing connections and incoming SSH connections. To allow incoming
+# connections from VMs running netperf, we need to add iptables rules
+# on the VM running netserver.
+_COS_RE = re.compile(r'\b(cos|gci)-')
+
 
 def GetConfig(user_config):
   return configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
@@ -104,7 +120,11 @@ def Prepare(benchmark_spec):
   vms = vms[:2]
   vm_util.RunThreaded(PrepareNetperf, vms)
 
-  num_streams = FLAGS.netperf_num_streams
+  num_streams = max(FLAGS.netperf_num_streams)
+
+  # See comments where _COS_RE is defined.
+  if re.search(_COS_RE, vms[1].image):
+    _SetupHostFirewall(benchmark_spec)
 
   # Start the netserver processes
   if vm_util.ShouldRunOnExternalIpAddress():
@@ -117,17 +137,34 @@ def Prepare(benchmark_spec):
                        netserver_path=netperf.NETSERVER_PATH)
   vms[1].RemoteCommand(netserver_cmd)
 
-  # Install some stuff on the client vm
-  vms[0].Install('pip')
-
-  # Create a scratch directory for the remote test script
-  vms[0].RemoteCommand('sudo mkdir -p /opt/run/')
-  vms[0].RemoteCommand('sudo chmod 777 /opt/run/')
   # Copy remote test script to client
   path = data.ResourcePath(os.path.join(REMOTE_SCRIPTS_DIR, REMOTE_SCRIPT))
   logging.info('Uploading %s to %s', path, vms[0])
-  vms[0].PushFile(path, '/opt/run/')
-  vms[0].RemoteCommand('sudo chmod 777 /opt/run/%s' % REMOTE_SCRIPT)
+  vms[0].PushFile(path)
+  vms[0].RemoteCommand('sudo chmod 777 %s' % REMOTE_SCRIPT)
+
+
+def _SetupHostFirewall(benchmark_spec):
+  """Set up host firewall to allow incoming traffic.
+
+  Args:
+    benchmark_spec: The benchmark specification. Contains all data that is
+        required to run the benchmark.
+  """
+
+  client_vm = benchmark_spec.vms[0]
+  server_vm = benchmark_spec.vms[1]
+
+  ip_addrs = [client_vm.internal_ip]
+  if vm_util.ShouldRunOnExternalIpAddress():
+    ip_addrs.append(client_vm.ip_address)
+
+  logging.info('setting up host firewall on %s running %s for client at %s',
+               server_vm.name, server_vm.image, ip_addrs)
+  cmd = 'sudo iptables -A INPUT -p %s -s %s -j ACCEPT'
+  for protocol in 'tcp', 'udp':
+    for ip_addr in ip_addrs:
+      server_vm.RemoteHostCommand(cmd % (protocol, ip_addr))
 
 
 def _HistogramStatsCalculator(histogram, percentiles=PERCENTILES):
@@ -197,14 +234,18 @@ def _ParseNetperfOutput(stdout, metadata, benchmark_name,
   # 99th Percentile Latency Microseconds,Minimum Latency Microseconds,
   # Maximum Latency Microseconds\n
   # 1405.50,Trans/s,2.522,4,783.80,683,735,841,600,900\n
-  fp = io.StringIO(stdout)
-  # "-o" flag above specifies CSV output, but there is one extra header line:
-  banner = next(fp)
-  assert banner.startswith('MIGRATED'), stdout
-  r = csv.DictReader(fp)
-  results = next(r)
-  logging.info('Netperf Results: %s', results)
-  assert 'Throughput' in results
+  try:
+    fp = io.StringIO(stdout)
+    # "-o" flag above specifies CSV output, but there is one extra header line:
+    banner = next(fp)
+    assert banner.startswith('MIGRATED'), stdout
+    r = csv.DictReader(fp)
+    results = next(r)
+    logging.info('Netperf Results: %s', results)
+    assert 'Throughput' in results
+  except:
+    raise Exception('Netperf ERROR: Failed to parse stdout. STDOUT: %s' %
+                    stdout)
 
   # Update the metadata with some additional infos
   meta_keys = [('Confidence Iterations Run', 'confidence_iter'),
@@ -239,18 +280,18 @@ def _ParseNetperfOutput(stdout, metadata, benchmark_name,
     hist_metadata.update(metadata)
     latency_samples.append(sample.Sample(
         '%s_Latency_Histogram' % benchmark_name, 0, 'us', hist_metadata))
-
-  for metric_key, metric_name in [
-      ('50th Percentile Latency Microseconds', 'p50'),
-      ('90th Percentile Latency Microseconds', 'p90'),
-      ('99th Percentile Latency Microseconds', 'p99'),
-      ('Minimum Latency Microseconds', 'min'),
-      ('Maximum Latency Microseconds', 'max'),
-      ('Stddev Latency Microseconds', 'stddev')]:
-    if metric_key in results:
-      latency_samples.append(
-          sample.Sample('%s_Latency_%s' % (benchmark_name, metric_name),
-                        float(results[metric_key]), 'us', metadata))
+  if unit != MBPS:
+    for metric_key, metric_name in [
+        ('50th Percentile Latency Microseconds', 'p50'),
+        ('90th Percentile Latency Microseconds', 'p90'),
+        ('99th Percentile Latency Microseconds', 'p99'),
+        ('Minimum Latency Microseconds', 'min'),
+        ('Maximum Latency Microseconds', 'max'),
+        ('Stddev Latency Microseconds', 'stddev')]:
+      if metric_key in results:
+        latency_samples.append(
+            sample.Sample('%s_Latency_%s' % (benchmark_name, metric_name),
+                          float(results[metric_key]), 'us', metadata))
 
   return (throughput_sample, latency_samples, latency_hist)
 
@@ -294,21 +335,33 @@ def RunNetperf(vm, benchmark_name, server_ip, num_streams):
                      server_ip=server_ip,
                      length=FLAGS.netperf_test_length,
                      confidence=confidence, verbosity=verbosity)
+  if FLAGS.netperf_thinktime != 0:
+    netperf_cmd += (' -X {thinktime},{thinktime_array_size},'
+                    '{thinktime_run_length} ').format(
+                        thinktime=FLAGS.netperf_thinktime,
+                        thinktime_array_size=FLAGS.netperf_thinktime_array_size,
+                        thinktime_run_length=FLAGS.netperf_thinktime_run_length)
+
 
   # Run all of the netperf processes and collect their stdout
   # TODO: Record start times of netperf processes on the remote machine
 
-  remote_script_path = '/opt/run/%s' % REMOTE_SCRIPT
-  remote_cmd = '%s --netperf_cmd="%s" --num_streams=%s --port_start=%s' % \
-               (remote_script_path, netperf_cmd, num_streams, PORT_START)
-  remote_stdout, _ = vm.RemoteCommand(remote_cmd)
+  # Give the remote script the max possible test length plus 5 minutes to
+  # complete
+  remote_cmd_timeout = \
+      FLAGS.netperf_test_length * (FLAGS.netperf_max_iter or 1) + 300
+  remote_cmd = ('./%s --netperf_cmd="%s" --num_streams=%s --port_start=%s' %
+                (REMOTE_SCRIPT, netperf_cmd, num_streams, PORT_START))
+  remote_stdout, _ = vm.RemoteCommand(remote_cmd,
+                                      timeout=remote_cmd_timeout)
 
   # Decode stdouts, stderrs, and return codes from remote command's stdout
   stdouts, stderrs, return_codes = json.loads(remote_stdout)
 
   # Metadata to attach to samples
   metadata = {'netperf_test_length': FLAGS.netperf_test_length,
-              'max_iter': FLAGS.netperf_max_iter or 1}
+              'max_iter': FLAGS.netperf_max_iter or 1,
+              'sending_thread_count': num_streams}
 
   parsed_output = [_ParseNetperfOutput(stdout, metadata, benchmark_name,
                                        enable_latency_histograms)
@@ -337,8 +390,7 @@ def RunNetperf(vm, benchmark_name, server_ip, num_streams):
     throughput_stats['min'] = min(throughputs)
     throughput_stats['max'] = max(throughputs)
     # Calculate aggregate throughput
-    assert num_streams, len(throughputs)
-    throughput_stats['total'] = throughput_stats['average'] * num_streams
+    throughput_stats['total'] = throughput_stats['average'] * len(throughputs)
     # Create samples for throughput stats
     for stat, value in throughput_stats.items():
       samples.append(
@@ -377,35 +429,36 @@ def Run(benchmark_spec):
     A list of sample.Sample objects.
   """
   vms = benchmark_spec.vms
-  client_vm = vms[0]
-  server_vm = vms[1]
+  client_vm = vms[0]  # Client aka "sending vm"
+  server_vm = vms[1]  # Server aka "receiving vm"
   logging.info('netperf running on %s', client_vm)
   results = []
-  metadata = {'ip_type': 'external'}
-  for vm_specifier, vm in ('receiving', server_vm), ('sending', client_vm):
-    metadata['{0}_zone'.format(vm_specifier)] = vm.zone
-    for k, v in vm.GetMachineTypeDict().iteritems():
-      metadata['{0}_{1}'.format(vm_specifier, k)] = v
+  metadata = {
+      'sending_zone': client_vm.zone,
+      'sending_machine_type': client_vm.machine_type,
+      'receiving_zone': server_vm.zone,
+      'receiving_machine_type': server_vm.machine_type
+  }
 
-  num_streams = FLAGS.netperf_num_streams
-  assert(num_streams >= 1)
+  for num_streams in FLAGS.netperf_num_streams:
+    assert(num_streams >= 1)
 
-  for netperf_benchmark in FLAGS.netperf_benchmarks:
+    for netperf_benchmark in FLAGS.netperf_benchmarks:
+      if vm_util.ShouldRunOnExternalIpAddress():
+        external_ip_results = RunNetperf(client_vm, netperf_benchmark,
+                                         server_vm.ip_address, num_streams)
+        for external_ip_result in external_ip_results:
+          external_ip_result.metadata['ip_type'] = 'external'
+          external_ip_result.metadata.update(metadata)
+        results.extend(external_ip_results)
 
-    if vm_util.ShouldRunOnExternalIpAddress():
-      external_ip_results = RunNetperf(client_vm, netperf_benchmark,
-                                       server_vm.ip_address, num_streams)
-      for external_ip_result in external_ip_results:
-        external_ip_result.metadata.update(metadata)
-      results.extend(external_ip_results)
-
-    if vm_util.ShouldRunOnInternalIpAddress(client_vm, server_vm):
-      internal_ip_results = RunNetperf(client_vm, netperf_benchmark,
-                                       server_vm.internal_ip, num_streams)
-      for internal_ip_result in internal_ip_results:
-        internal_ip_result.metadata.update(metadata)
-        internal_ip_result.metadata['ip_type'] = 'internal'
-      results.extend(internal_ip_results)
+      if vm_util.ShouldRunOnInternalIpAddress(client_vm, server_vm):
+        internal_ip_results = RunNetperf(client_vm, netperf_benchmark,
+                                         server_vm.internal_ip, num_streams)
+        for internal_ip_result in internal_ip_results:
+          internal_ip_result.metadata.update(metadata)
+          internal_ip_result.metadata['ip_type'] = 'internal'
+        results.extend(internal_ip_results)
 
   return results
 
@@ -419,4 +472,4 @@ def Cleanup(benchmark_spec):
   """
   vms = benchmark_spec.vms
   vms[1].RemoteCommand('sudo killall netserver')
-  vms[0].RemoteCommand('rm -rf /opt/run/')
+  vms[0].RemoteCommand('sudo rm -rf %s' % REMOTE_SCRIPT)

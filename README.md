@@ -2,8 +2,8 @@ PerfKit Benchmarker
 ==================
 
 PerfKit Benchmarker is an open effort to define a canonical set of benchmarks to measure and compare cloud
-offerings.  It's designed to operate via vendor provided command line tools. The benchmarks are not
-tuned (ie the defaults) because this is what most users will use.  This should help us drive to great defaults.
+offerings.  It's designed to operate via vendor provided command line tools. The benchmark default settings are not
+tuned for any particular platform or instance type. These settings are recommended for consistency across services.
 Only in the rare case where there is a common practice like setting the buffer pool size of a database do we
 change any settings.
 
@@ -14,7 +14,7 @@ This README is designed to give you the information you need to get running with
 * [Governing rules] (https://github.com/GoogleCloudPlatform/PerfKitBenchmarker/wiki/Governing-Rules)
 * [Community meeting decks and notes] (https://github.com/GoogleCloudPlatform/PerfKitBenchmarker/wiki/Community-Meeting-Notes-Decks)
 * [Design documents] (https://github.com/GoogleCloudPlatform/PerfKitBenchmarker/wiki/Design-Docs)
-* You are always welcome to [open an issue] (https://github.com/GoogleCloudPlatform/PerfKitBenchmarker/issues) as well to contact us.
+* You are always welcome to [open an issue] (https://github.com/GoogleCloudPlatform/PerfKitBenchmarker/issues), or to join us on #PerfKitBenchmarker on freenode to discuss issues you're having, pull requests, or anything else related to PerfKitBenchmarker
 
 
 Known Issues
@@ -39,7 +39,7 @@ In its current release these are the benchmarks that are executed:
   - `bonnie++`: [GPL v2](http://www.coker.com.au/bonnie++/readme.html)
   - `cassandra_ycsb`: [Apache v2](http://cassandra.apache.org/)
   - `cassandra_stress`: [Apache v2](http://cassandra.apache.org/)
-  - `cloudsuite3.0`: [CloudSuite 3.0 license](http://cloudsuite.ch/licenses/)
+  - `cloudsuite3.0`: [CloudSuite 3.0 license](http://cloudsuite.ch/pages/license/)
   - `cluster_boot`: MIT License
   - `coremark`: [EEMBC](https://www.eembc.org/)
   - `copy_throughput`: Apache v2
@@ -108,7 +108,7 @@ Before you can run the PerfKit Benchmarker, you need account(s) on the cloud pro
 * [Google Cloud Platform](https://cloud.google.com)
 * [AWS](http://aws.amazon.com)
 * [Azure](http://azure.microsoft.com)
-* [AliCloud](http://www.alicloud.com)
+* [AliCloud](http://www.aliyun.com)
 * [DigitalOcean](https://www.digitalocean.com)
 * [Rackspace Cloud](https://www.rackspace.com)
 * [ProfitBricks](https://www.profitbricks.com/)
@@ -154,7 +154,7 @@ $ sudo pip install -r requirements.txt
 
 ## Cloud account setup
 
-This section describes the setup steps needed for each cloud system.  
+This section describes the setup steps needed for each cloud system. Note that you only need to perform setup steps on the clouds you wish to test. If you only want to test Google Cloud, you only need to install and configure `gcloud`.
 * [Google Cloud](#install-gcloud-and-setup-authentication)
 * [OpenStack](#install-openstack-cli-client-and-setup-authentication)
 * [Kubernetes](#kubernetes-configuration-and-credentials)
@@ -415,6 +415,13 @@ Run the following command to install `aliyuncli` (omit the `sudo` on Windows)
    ```bash
    $ sudo pip install -r perfkitbenchmarker/providers/alicloud/requirements.txt
    ```
+   In some CentOS version, you may need:
+   
+   ```bash
+   $ sudo yum install libffi-devel.x86_64
+   $ sudo yum install openssl-devel.x86_64
+   $ sudo pip install 'colorama<=0.3.3'
+   ```
 
    To check if AliCloud is installed:
 
@@ -544,7 +551,10 @@ Open the `.boto` file and edit the following fields:
 
 1. In the [Credentials] section:
 
-   `gs_oauth2_refresh_token`: set it to be the same as the `refresh_token` field in your gcloud credential file (~/.config/gcloud/credentials), which was setup as part of the `gcloud auth login` step.
+   `gs_oauth2_refresh_token`: set it to be the same as the `refresh_token` field in your gcloud credential file (~/.config/gcloud/credentials.db), which was setup as part of the `gcloud auth login` step. To see the refresh token, run
+   ```bash
+   $ strings ~/.config/gcloud/credentials.db.
+   ```
 
    `aws_access_key_id`, `aws_secret_access_key`: set these to be the AWS access keys you intend to use for these tests, or you can use the same keys as those in your existing AWS credentials file (`~/.aws/credentials`).
 
@@ -554,7 +564,7 @@ Open the `.boto` file and edit the following fields:
 
 3. In the `[OAuth2]` section:
 
-   `client_id`, `client_secret`: set these to be the same as those in your gcloud credentials file (`~/.config/gcloud/credentials`), which was setup as part of the `gcloud auth login` step.
+   `client_id`, `client_secret`: set these to be the same as those in your gcloud credentials file (`~/.config/gcloud/credentials.db`), which was setup as part of the `gcloud auth login` step.
 
 
 Running a Single Benchmark
@@ -687,15 +697,16 @@ PerfKit Benchmarker.
 
 Flag | Notes
 -----|------
-`--help`         | see all flags
+`--helpmatch=pkb`         | see all global flags
+`--helpmatch=hpcc` | see all flags associated with the hpcc benchmark. You can substitute any benchmark name to see the associated flags.
 `--benchmarks`   | A comma separated list of benchmarks or benchmark sets to run such as `--benchmarks=iperf,ping` . To see the full list, run `./pkb.py --help`
 `--cloud`        | Cloud where the benchmarks are run. See the table below for choices.
 `--machine_type` | Type of machine to provision if pre-provisioned machines are not used. Most cloud providers accept the names of pre-defined provider-specific machine types (for example, GCP supports `--machine_type=n1-standard-8` for a GCE n1-standard-8 VM). Some cloud providers support YAML expressions that match the corresponding VM spec machine_type property in the [YAML configs](#configurations-and-configuration-overrides) (for example, GCP supports `--machine_type="{cpus: 1, memory: 4.5GiB}"` for a GCE custom VM with 1 vCPU and 4.5GiB memory). Note that the value provided by this flag will affect all provisioned machines; users who wish to provision different machine types for different roles within a single benchmark run should use the [YAML configs](#configurations-and-configuration-overrides) for finer control.
-`--zone`         | This flag allows you to override the default zone. See the table below.
+`--zones`         | This flag allows you to override the default zone. See the table below.
 `--data_disk_type` | Type of disk to use. Names are provider-specific, but see table below.
 
 The default cloud is 'GCP', override with the `--cloud` flag. Each cloud has a default
-zone which you can override with the `--zone` flag, the flag supports the same values
+zone which you can override with the `--zones` flag, the flag supports the same values
 that the corresponding Cloud CLIs take:
 
 Cloud name | Default zone | Notes
@@ -709,12 +720,12 @@ OpenStack | nova | |
 CloudStack | QC-1 | |
 Rackspace | IAD | OnMetal machine-types are available only in IAD zone
 Kubernetes | k8s | |
-ProfitBricks | ZONE_1 | Additional zones: ZONE_2
+ProfitBricks | AUTO | Additional zones: ZONE_1, ZONE_2, or ZONE_3
 
 Example:
 
 ```bash
-./pkb.py --cloud=GCP --zone=us-central1-a --benchmarks=iperf,ping
+./pkb.py --cloud=GCP --zones=us-central1-a --benchmarks=iperf,ping
 ```
 
 The disk type names vary by provider, but the following table summarizes some
@@ -889,7 +900,7 @@ iperf:
 I called my file `iperf.yaml` and used it to run iperf from Siberia to a GCP VM in us-central1-f as follows:
 
 ```bash
-$ ./pkb.py --benchmarks=iperf --machine_type=f1-micro --benchmark_config_file=iperf.yaml --zone=us-central1-f --ip_addresses=EXTERNAL
+$ ./pkb.py --benchmarks=iperf --machine_type=f1-micro --benchmark_config_file=iperf.yaml --zones=us-central1-f --ip_addresses=EXTERNAL
 ```
 
 * `ip_addresses=EXTERNAL` tells PerfKit Benchmarker not to use 10.X (ie Internal) machine addresses that all Cloud VMs have.  Just use the external IP address.
@@ -943,6 +954,42 @@ netperf:
 
 The new defaults will only apply to the benchmark in which they are specified.
 
+Using Elasticsearch Publisher
+=================
+PerfKit data can optionally be published to an Elasticsearch server. To enable this, the
+`elasticsearch` Python package must be installed.
+
+```bash
+$ sudo pip install elasticsearch
+```
+
+Note: The `elasticsearch` Python library and Elasticsearch must have matching major versions.
+
+The following are flags used by the Elasticsearch publisher. At minimum, all that is needed
+is the `--es_uri` flag.
+
+Flag | Notes
+-----|------
+`--es_uri`         | The Elasticsearch server address and port (e.g. localhost:9200)
+`--es_index`       | The Elasticsearch index name to store documents (default: perfkit)
+`--es_type`        | The Elasticsearch document type (default: result)
+
+Note: Amazon ElasticSearch service currently does not support transport on port 9200 therefore you must use endpoint with port 80 eg. `search-<ID>.es.amazonaws.com:80` and allow your IP address in the cluster.
+
+Using InfluxDB Publisher
+=================
+No additional packages need to be installed in order to publish Perfkit data to an InfluxDB
+server.
+
+InfluxDB Publisher takes in the flags for the Influx uri and the Influx DB name. The publisher
+will default to the pre-set defaults, identified below, if no uri or DB name is set. However,
+the user is required to at the very least call the `--influx_uri` flag to publish data to Influx.
+
+
+| Flag               | Notes                                                                | Default        |
+|--------------------|----------------------------------------------------------------------|----------------|
+| `--influx_uri`     | The Influx DB address and port. Expects the format hostname:port     | localhost:8086 |
+| `--influx_db_name` | The name of Influx DB database that you wish to publish to or create | perfkit        |
 
 How to Extend PerfKit Benchmarker
 =================
@@ -961,6 +1008,7 @@ Even with lots of comments we make to support more detailed documention.  You wi
 
 Integration Testing
 ===================
+If you wish to run unit or integration tests, ensure that you have `tox >= 2.0.0` installed.
 
 In addition to regular unit tests, which are run via
 [`hooks/check-everything`](hooks/check-everything), PerfKit Benchmarker has

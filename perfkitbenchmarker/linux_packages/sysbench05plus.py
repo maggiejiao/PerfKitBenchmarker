@@ -20,43 +20,43 @@ oltp benchmarks depending on older version of sysbench will break if we
 install 0.5 or later for them. Therefore, it's necessary that we have a
 separate installer here for 0.5 and later.
 """
-from perfkitbenchmarker import vm_util
+from perfkitbenchmarker.linux_packages import INSTALL_DIR
+
+SYSBENCH05PLUS_PATH = '%s/bin/sysbench' % INSTALL_DIR
+PREPARE_SCRIPT_PATH = ('%s/share/doc/sysbench/tests/db/parallel_prepare.lua'
+                       % INSTALL_DIR)
+OLTP_SCRIPT_PATH = '%s/share/doc/sysbench/tests/db/oltp.lua' % INSTALL_DIR
+
+
+def _Install(vm):
+  """Installs the SysBench 0.5 on the VM."""
+  vm.Install('build_tools')
+  vm.InstallPackages('bzr')
+  vm.RemoteCommand('cd ~ && bzr branch lp:sysbench')
+  vm.RemoteCommand(('cd ~/sysbench && ./autogen.sh &&'
+                    ' ./configure --prefix=%s --mandir=%s/share/man &&'
+                    ' make') % (INSTALL_DIR, INSTALL_DIR))
+  vm.RemoteCommand('cd ~/sysbench && sudo make install')
+  vm.RemoteCommand('sudo mkdir %s/share/doc/sysbench/tests/db -p' %
+                   INSTALL_DIR)
+  vm.RemoteCommand('sudo cp ~/sysbench/sysbench/tests/db/*'
+                   ' %s/share/doc/sysbench/tests/db/' % INSTALL_DIR)
 
 
 def YumInstall(vm):
   """ Installs SysBench 0.5 for Rhel/CentOS. We have to build from source!"""
-  vm.Install('build_tools')
-  vm.InstallPackages('bzr')
   vm.InstallPackages('mysql mysql-server mysql-devel')
-  vm.RemoteCommand('cd ~ && bzr branch lp:sysbench')
-  vm.RemoteCommand(('cd ~/sysbench && ./autogen.sh &&'
-                    ' ./configure --prefix=%s --mandir=%s/share/man &&'
-                    ' make') % (vm_util.VM_TMP_DIR, vm_util.VM_TMP_DIR))
-  vm.RemoteCommand('cd ~/sysbench && sudo make install')
-  vm.RemoteCommand('sudo mkdir %s/share/doc/sysbench/tests/db -p' %
-                   vm_util.VM_TMP_DIR)
-  vm.RemoteCommand('sudo cp ~/sysbench/sysbench/tests/db/*'
-                   ' %s/share/doc/sysbench/tests/db/' % vm_util.VM_TMP_DIR)
-  vm.RemoteCommand('echo "export PATH=$PATH:%s/bin" >> ~/.bashrc && '
-                   'source ~/.bashrc' % vm_util.VM_TMP_DIR)
-
-  # Cleanup the source code enlisthment from bzr, we don't need it anymore.
-  vm.RemoteCommand('cd ~ && rm -fr ./sysbench')
+  _Install(vm)
 
 
 def AptInstall(vm):
-  """ Installs the sysbench 0.5 or later versions via APT Install """
-  vm.Install('wget')
-  vm.RemoteCommand('wget https://repo.percona.com/apt/'
-                   'percona-release_0.1-4.$(lsb_release -sc)_all.deb')
-  vm.RemoteCommand(
-      'sudo dpkg -i percona-release_0.1-4.$(lsb_release -sc)_all.deb')
-  vm.RemoteCommand('sudo apt-get update')
-  vm.InstallPackages('libc6')
-  vm.InstallPackages('mysql-client')
-  vm.InstallPackages('sysbench')
+  """Installs the sysbench 0.5 on the VM."""
+  vm.RemoteCommand('sudo ln -s /usr/lib/x86_64-linux-gnu/libmysqlclient.so '
+                   '/usr/lib/x86_64-linux-gnu/libmysqlclient_r.so')
+  vm.InstallPackages('mysql-client mysql-server libmysqlclient-dev')
+  _Install(vm)
 
 
-def AptUninstall(vm):
-  vm.RemoteCommand('sudo dpkg --purge percona-release')
-  vm.RemoteCommand('sudo apt-get update')
+def Uninstall(vm):
+  # Cleanup the source code enlisthment from bzr, we don't need it anymore.
+  vm.RemoteCommand('cd ~ && rm -fr ./sysbench')

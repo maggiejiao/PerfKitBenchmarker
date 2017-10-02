@@ -26,6 +26,7 @@ operate on the VM: boot, shutdown, etc.
 """
 
 import json
+import itertools
 
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
@@ -49,82 +50,90 @@ class AzurePublicIPAddress(resource.BaseResource):
     super(AzurePublicIPAddress, self).__init__()
     self.location = location
     self.name = name
+    self._deleted = False
     self.resource_group = azure_network.GetResourceGroup()
 
   def _Create(self):
     vm_util.IssueCommand(
         [azure.AZURE_PATH, 'network', 'public-ip', 'create',
          '--location', self.location,
-         self.name] + self.resource_group.args)
+         '--name', self.name] + self.resource_group.args)
 
   def _Exists(self):
-    stdout, _, retcode = vm_util.IssueCommand(
-        [azure.AZURE_PATH, 'network', 'public-ip', 'show',
-         '--json',
-         self.name] + self.resource_group.args)
+    if self._deleted:
+      return False
 
-    return retcode == 0 and stdout != '{}\n'
+    stdout, _, _ = vm_util.IssueCommand(
+        [azure.AZURE_PATH, 'network', 'public-ip', 'show',
+         '--output', 'json',
+         '--name', self.name] + self.resource_group.args)
+    try:
+      json.loads(stdout)
+      return True
+    except:
+      return False
 
   def GetIPAddress(self):
     stdout, _ = vm_util.IssueRetryableCommand(
         [azure.AZURE_PATH, 'network', 'public-ip', 'show',
-         '--json',
-         self.name] + self.resource_group.args)
+         '--output', 'json',
+         '--name', self.name] + self.resource_group.args)
 
     response = json.loads(stdout)
     return response['ipAddress']
 
   def _Delete(self):
-    vm_util.IssueCommand(
-        [azure.AZURE_PATH, 'network', 'public-ip', 'delete',
-         '--resource-group', self.resource_group.name,
-         '--quiet',
-         self.name])
+    self._deleted = True
 
 
 class AzureNIC(resource.BaseResource):
-  def __init__(self, subnet, name):
+  def __init__(self, subnet, name, public_ip):
     super(AzureNIC, self).__init__()
     self.subnet = subnet
     self.name = name
+    self.public_ip = public_ip
+    self._deleted = False
     self.resource_group = azure_network.GetResourceGroup()
     self.location = self.subnet.vnet.location
-    self.args = ['--nic-name', self.name]
+    self.args = ['--nics', self.name]
 
   def _Create(self):
     vm_util.IssueCommand(
         [azure.AZURE_PATH, 'network', 'nic', 'create',
          '--location', self.location,
-         '--subnet-vnet-name', self.subnet.vnet.name,
-         '--subnet-name', self.subnet.name,
-         self.name] + self.resource_group.args)
+         '--vnet-name', self.subnet.vnet.name,
+         '--subnet', self.subnet.name,
+         '--public-ip-address', self.public_ip,
+         '--name', self.name] + self.resource_group.args)
 
   def _Exists(self):
+    if self._deleted:
+      return False
     # Same deal as AzurePublicIPAddress. 'show' doesn't error out if
     # the resource doesn't exist, but no-op 'set' does.
-    stdout, _, retcode = vm_util.IssueCommand(
+    stdout, _, _ = vm_util.IssueCommand(
         [azure.AZURE_PATH, 'network', 'nic', 'show',
-         '--json',
-         self.name] + self.resource_group.args)
-
-    return retcode == 0 and stdout != '{}\n'
+         '--output', 'json',
+         '--name', self.name] + self.resource_group.args)
+    try:
+      json.loads(stdout)
+      return True
+    except:
+      return False
 
   def GetInternalIP(self):
     """Grab some data."""
 
     stdout, _ = vm_util.IssueRetryableCommand(
         [azure.AZURE_PATH, 'network', 'nic', 'show',
-         '--json',
-         self.name] + self.resource_group.args)
+         '--output', 'json',
+         '--name', self.name] + self.resource_group.args)
 
     response = json.loads(stdout)
-    return response['ipConfigurations'][0]['privateIPAddress']
+    return response['ipConfigurations'][0]['privateIpAddress']
 
   def _Delete(self):
-    vm_util.IssueCommand(
-        [azure.AZURE_PATH, 'network', 'nic', 'delete',
-         '--quiet',
-         self.name] + self.resource_group.args)
+    self._deleted = True
 
 
 class AzureVirtualMachineMetaClass(virtual_machine.AutoRegisterVmMeta):
@@ -159,12 +168,15 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.network = azure_network.AzureNetwork.GetNetwork(self)
     self.firewall = azure_network.AzureFirewall.GetFirewall()
     self.max_local_disks = 1
+    self._lun_counter = itertools.count()
+    self._deleted = False
 
     self.resource_group = azure_network.GetResourceGroup()
     self.public_ip = AzurePublicIPAddress(self.zone, self.name + '-public-ip')
     self.nic = AzureNIC(self.network.subnet,
-                        self.name + '-nic')
+                        self.name + '-nic', self.public_ip.name)
     self.storage_account = self.network.storage_account
+    self.image = vm_spec.image or self.IMAGE_URN
 
     disk_spec = disk.BaseDiskSpec('azure_os_disk')
     self.os_disk = azure_disk.AzureDisk(disk_spec,
@@ -179,66 +191,51 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.public_ip.Create()
     self.nic.Create()
 
-  def _DeleteDependencies(self):
-    """Delete VM dependencies."""
-    if not self.os_disk.is_image:
-      self.os_disk.Delete()
-
-    # Delete the public IP after the NIC to avoid an error that you
-    # can't delete a public IP associated with a NIC.
-    self.nic.Delete()
-    self.public_ip.Delete()
-
   def _Create(self):
     create_cmd = (
         [azure.AZURE_PATH, 'vm', 'create',
          '--location', self.zone,
-         '--image-urn', self.IMAGE_URN,
-         '--os-type', 'Linux',
-         '--ssh-publickey-file', self.ssh_public_key,
-         '--vm-size', self.machine_type,
-         '--public-ip-name', self.public_ip.name,
-         '--storage-account-name', self.storage_account.name,
+         '--image', self.image,
+         '--size', self.machine_type,
          '--admin-username', self.user_name,
-         self.name] +
+         '--availability-set', self.network.avail_set.name,
+         '--storage-sku', self.storage_account.storage_type,
+         '--name', self.name] +
         self.resource_group.args +
-        self.network.vnet.args +
-        self.network.subnet.args +
         self.nic.args)
 
     if self.password:
       create_cmd.extend(['--admin-password', self.password])
     else:
-      create_cmd.extend(['--ssh-publickey-file', self.ssh_public_key])
+      create_cmd.extend(['--ssh-key-value', self.ssh_public_key])
     vm_util.IssueCommand(create_cmd)
 
-  def _Delete(self):
-    vm_util.IssueCommand(
-        [azure.AZURE_PATH, 'vm', 'delete',
-         '--quiet',
-         self.name] + self.resource_group.args)
-
   def _Exists(self):
-    """Returns true if the VM exists and attempts to get some data."""
+    """Returns True if the VM exists."""
+    if self._deleted:
+      return False
+    show_cmd = [
+        azure.AZURE_PATH, 'vm', 'show', '--output', 'json',
+        '--name', self.name
+    ] + self.resource_group.args
+    stdout, _, _ = vm_util.IssueCommand(show_cmd)
+    try:
+      json.loads(stdout)
+      return True
+    except:
+      return False
 
-    # 'azure vm show' returns 0 even if the VM exists, and the no-op
-    # 'set' trick doesn't work like it does for other resources
-    # because 'vm set' doesn't allow no-ops, so we are forced to
-    # actually parse the results of 'show'.
-    stdout, _, retcode = vm_util.IssueCommand(
-        [azure.AZURE_PATH, 'vm', 'show',
-         '--json',
-         self.name] + self.resource_group.args)
-
-    return retcode == 0 and stdout != '{}\n'
+  def _Delete(self):
+    # The VM will be deleted when the resource group is.
+    self._deleted = True
 
   @vm_util.Retry()
   def _PostCreate(self):
     """Get VM data."""
     stdout, _ = vm_util.IssueRetryableCommand(
         [azure.AZURE_PATH, 'vm', 'show',
-         '--json',
-         self.name] + self.resource_group.args)
+         '--output', 'json',
+         '--name', self.name] + self.resource_group.args)
     response = json.loads(stdout)
     self.os_disk.name = response['storageProfile']['osDisk']['name']
     self.os_disk.created = True
@@ -246,14 +243,11 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.ip_address = self.public_ip.GetIPAddress()
 
   def AddMetadata(self, **tags):
-    tag_string = ';'.join(
-        ['%s=%s' % (key, value)
-         for key, value in tags.iteritems()])
+    tag_list = ['tags.%s=%s' % (k, v) for k, v in tags.iteritems()]
     vm_util.IssueRetryableCommand(
-        [azure.AZURE_PATH, 'vm', 'set',
-         self.name,
-         '--tags', tag_string] +
-        self.resource_group.args)
+        [azure.AZURE_PATH, 'vm', 'update',
+         '--name', self.name] + self.resource_group.args +
+        ['--set'] + tag_list)
 
   def CreateScratchDisk(self, disk_spec):
     """Create a VM's scratch disk.
@@ -263,34 +257,26 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     """
     disks = []
 
-    for disk_idx in xrange(disk_spec.num_striped_disks):
-      data_disk = azure_disk.AzureDisk(disk_spec, self.name,
-                                       self.machine_type, self.storage_account,
-                                       disk_idx)
+    for _ in xrange(disk_spec.num_striped_disks):
       if disk_spec.disk_type == disk.LOCAL:
         # Local disk numbers start at 1 (0 is the system disk).
-        data_disk.disk_number = self.local_disk_counter + 1
+        disk_number = self.local_disk_counter + 1
         self.local_disk_counter += 1
+        lun = None
         if self.local_disk_counter > self.max_local_disks:
           raise errors.Error('Not enough local disks.')
       else:
         # Remote disk numbers start at 1 + max_local disks (0 is the system disk
         # and local disks occupy [1, max_local_disks]).
-        data_disk.disk_number = (self.remote_disk_counter +
-                                 1 + self.max_local_disks)
+        disk_number = self.remote_disk_counter + 1 + self.max_local_disks
         self.remote_disk_counter += 1
+        lun = next(self._lun_counter)
+      data_disk = azure_disk.AzureDisk(disk_spec, self.name, self.machine_type,
+                                       self.storage_account, lun)
+      data_disk.disk_number = disk_number
       disks.append(data_disk)
 
     self._CreateScratchDiskFromDisks(disk_spec, disks)
-
-  def GetLocalDisks(self):
-    """Returns a list of local disks on the VM.
-
-    Returns:
-      A list of strings, where each string is the absolute path to the local
-          disks on the VM (e.g. '/dev/sdb').
-    """
-    return ['/dev/sdb']
 
 
 class DebianBasedAzureVirtualMachine(AzureVirtualMachine,

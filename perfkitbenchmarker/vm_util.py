@@ -15,6 +15,7 @@
 """Set of utility functions for working with virtual machines."""
 
 import contextlib
+import functools32
 import logging
 import os
 import random
@@ -60,6 +61,8 @@ OUTPUT_STDOUT = 0
 OUTPUT_STDERR = 1
 OUTPUT_EXIT_CODE = 2
 
+_SIMULATE_MAINTENANCE_SEMAPHORE = threading.Semaphore(0)
+
 flags.DEFINE_integer('default_timeout', TIMEOUT, 'The default timeout for '
                      'retryable commands in seconds.')
 flags.DEFINE_integer('burn_cpu_seconds', 0,
@@ -74,6 +77,12 @@ flags.DEFINE_integer('background_network_mbits_per_sec', None,
                      'Number of megabits per second of background '
                      'network traffic to generate during the run phase '
                      'of the benchmark')
+flags.DEFINE_boolean('simulate_maintenance', False,
+                     'Whether to simulate VM maintenance during the benchmark. '
+                     'This requires both benchmark and provider support.')
+flags.DEFINE_integer('simulate_maintenance_delay', 0,
+                     'The number of seconds to wait to start simulating '
+                     'maintenance.')
 
 
 class IpAddressSubset(object):
@@ -98,6 +107,9 @@ flags.DEFINE_enum('background_network_ip_type', IpAddressSubset.EXTERNAL,
                   'traffic')
 
 
+# Caching this will have the effect that even if the
+# run_uri changes, the temp dir will stay the same.
+@functools32.lru_cache()
 def GetTempDir():
   """Returns the opt dir of the current run."""
   return temp_dir.GetRunDirPath()
@@ -242,17 +254,17 @@ def Retry(poll_interval=POLL_INTERVAL, max_retries=MAX_RETRIES,
           sleep_time = poll_interval * fuzz_multiplier
           if ((time.time() + sleep_time) >= deadline or
               (max_retries >= 0 and tries > max_retries)):
-            raise e
+            raise
           else:
             if log_errors:
-              logging.error('Got exception running %s: %s', f.__name__, e)
+              logging.error('Retrying exception running %s: %s', f.__name__, e)
             time.sleep(sleep_time)
     return WrappedFunction
   return Wrap
 
 
 def IssueCommand(cmd, force_info_log=False, suppress_warning=False,
-                 env=None, timeout=DEFAULT_TIMEOUT, input=None):
+                 env=None, timeout=DEFAULT_TIMEOUT, cwd=None):
   """Tries running the provided command once.
 
   Args:
@@ -273,6 +285,7 @@ def IssueCommand(cmd, force_info_log=False, suppress_warning=False,
         return code will indicate an error, and stdout and stderr will
         contain what had already been written to them before the process was
         killed.
+    cwd: Directory in which to execute the command.
 
   Returns:
     A tuple of stdout, stderr, and retcode from running the provided command.
@@ -286,8 +299,7 @@ def IssueCommand(cmd, force_info_log=False, suppress_warning=False,
   with tempfile.TemporaryFile() as tf_out, tempfile.TemporaryFile() as tf_err:
     process = subprocess.Popen(cmd, env=env, shell=shell_value,
                                stdin=subprocess.PIPE, stdout=tf_out,
-                               stderr=tf_err)
-    logging.info('Spawned cmd=%r pid=%d', full_cmd, process.pid)
+                               stderr=tf_err, cwd=cwd)
 
     def _KillProcess():
       logging.error('IssueCommand timed out after %d seconds. '
@@ -519,3 +531,21 @@ def GenerateRandomWindowsPassword(password_length=PASSWORD_LENGTH):
   password.append(random.choice(string.digits))
   password.append(random.choice(special_chars))
   return ''.join(password)
+
+
+def StartSimulatedMaintenance():
+  """Initiates the simulated maintenance event."""
+  if FLAGS.simulate_maintenance:
+    _SIMULATE_MAINTENANCE_SEMAPHORE.release()
+
+
+def SetupSimulatedMaintenance(vm):
+  """Called ready VM for simulated maintenance."""
+  if FLAGS.simulate_maintenance:
+    def _SimulateMaintenance():
+      _SIMULATE_MAINTENANCE_SEMAPHORE.acquire()
+      time.sleep(FLAGS.simulate_maintenance_delay)
+      vm.SimulateMaintenanceEvent()
+    t = threading.Thread(target=_SimulateMaintenance)
+    t.daemon = True
+    t.start()

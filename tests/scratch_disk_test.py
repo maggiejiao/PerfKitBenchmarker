@@ -93,7 +93,7 @@ class ScratchDiskTestMixin(object):
     # VM Creation depends on there being a BenchmarkSpec.
     config_spec = benchmark_config_spec.BenchmarkConfigSpec(
         _BENCHMARK_NAME, flag_values=mocked_flags, vm_groups={})
-    self.spec = benchmark_spec.BenchmarkSpec(config_spec, _BENCHMARK_NAME,
+    self.spec = benchmark_spec.BenchmarkSpec(mock.MagicMock(), config_spec,
                                              _BENCHMARK_UID)
     self.addCleanup(context.SetThreadBenchmarkSpec, None)
 
@@ -179,7 +179,8 @@ class AwsScratchDiskTest(ScratchDiskTestMixin, unittest.TestCase):
 
   def _CreateVm(self):
     vm_spec = aws_virtual_machine.AwsVmSpec('test_vm_spec.AWS',
-                                            zone='us-east-1a')
+                                            zone='us-east-1a',
+                                            machine_type='test_machine_type')
     return aws_virtual_machine.DebianBasedAwsVirtualMachine(vm_spec)
 
   def _GetDiskClass(self):

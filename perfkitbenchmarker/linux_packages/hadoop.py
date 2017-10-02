@@ -26,8 +26,9 @@ import time
 from perfkitbenchmarker import data
 from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import vm_util
+from perfkitbenchmarker.linux_packages import INSTALL_DIR
 
-HADOOP_VERSION = '2.5.2'
+HADOOP_VERSION = '2.7.2'
 HADOOP_URL = ('http://www.us.apache.org/dist/hadoop/common/hadoop-{0}/'
               'hadoop-{0}.tar.gz').format(HADOOP_VERSION)
 
@@ -36,7 +37,7 @@ DATA_FILES = ['hadoop/core-site.xml.j2', 'hadoop/yarn-site.xml.j2',
               'hadoop/hadoop-env.sh.j2', 'hadoop/slaves.j2']
 START_HADOOP_SCRIPT = 'hadoop/start-hadoop.sh.j2'
 
-HADOOP_DIR = posixpath.join(vm_util.VM_TMP_DIR, 'hadoop')
+HADOOP_DIR = posixpath.join(INSTALL_DIR, 'hadoop')
 HADOOP_BIN = posixpath.join(HADOOP_DIR, 'bin')
 HADOOP_SBIN = posixpath.join(HADOOP_DIR, 'sbin')
 HADOOP_CONF_DIR = posixpath.join(HADOOP_DIR, 'etc', 'hadoop')
@@ -71,6 +72,7 @@ def AptInstall(vm):
   """Installs Hadoop on the VM."""
   libsnappy = 'libsnappy1'
   if not vm.HasPackage(libsnappy):
+    # libsnappy's name on ubuntu16.04 is libsnappy1v5. Let's try that instead.
     libsnappy = 'libsnappy1v5'
   vm.InstallPackages('%s libsnappy-dev' % libsnappy)
   _Install(vm)

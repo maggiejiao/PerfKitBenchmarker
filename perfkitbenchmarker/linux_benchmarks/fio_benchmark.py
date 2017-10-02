@@ -22,19 +22,21 @@ import json
 import logging
 import posixpath
 import re
+import time
 
 import jinja2
 
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import flags
 from perfkitbenchmarker import flag_util
+from perfkitbenchmarker import flags
 from perfkitbenchmarker import units
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import fio
 
-LOCAL_JOB_FILE_NAME = 'fio.job'  # used with vm_util.PrependTempDir()
+PKB_FIO_LOG_FILE_NAME = 'pkb_fio_avg'
+LOCAL_JOB_FILE_SUFFIX = '_fio.job'  # used with vm_util.PrependTempDir()
 REMOTE_JOB_FILE_PATH = posixpath.join(vm_util.VM_TMP_DIR, 'fio.job')
 DEFAULT_TEMP_FILE_NAME = 'fio-temp-file'
 MOUNT_POINT = '/scratch'
@@ -65,6 +67,16 @@ SCENARIOS = {
     'random_read_write': {
         'name': 'random_read_write',
         'rwkind': 'randrw',
+        'blocksize': '4k'
+    },
+    'sequential_trim': {
+        'name': 'sequential_trim',
+        'rwkind': 'trim',
+        'blocksize': '512k'
+    },
+    'rand_trim': {
+        'name': 'rand_trim',
+        'rwkind': 'randtrim',
         'blocksize': '4k'
     }
 }
@@ -135,6 +147,25 @@ flags.DEFINE_integer('fio_runtime', 600,
 flags.DEFINE_list('fio_parameters', [],
                   'Parameters to apply to all PKB generated fio jobs. Each '
                   'member of the list should be of the form "param=value".')
+flags.DEFINE_boolean('fio_lat_log', False,
+                     'Whether to collect a latency log of the fio jobs.')
+flags.DEFINE_boolean('fio_bw_log', False,
+                     'Whether to collect a bandwidth log of the fio jobs.')
+flags.DEFINE_boolean('fio_iops_log', False,
+                     'Whether to collect an IOPS log of the fio jobs.')
+flags.DEFINE_integer('fio_log_avg_msec', 1000,
+                     'By default, this will average each log entry in the '
+                     'fio latency, bandwidth, and iops logs over the specified '
+                     'period of time in milliseconds. If set to 0, fio will '
+                     'log an entry for every IO that completes, this can grow '
+                     'very quickly in size and can cause performance overhead.',
+                     lower_bound=0)
+flags.DEFINE_boolean('fio_hist_log', False,
+                     'Whether to collect clat histogram.')
+flags.DEFINE_integer('fio_log_hist_msec', 1000,
+                     'Same as fio_log_avg_msec, but logs entries for '
+                     'completion latency histograms. If set to 0, histogram '
+                     'logging is disabled.')
 
 
 FLAGS_IGNORED_FOR_CUSTOM_JOBFILE = {
@@ -212,7 +243,11 @@ stonewall
 rw={{scenario['rwkind']}}
 blocksize={{scenario['blocksize']}}
 iodepth={{iodepth}}
+{%- if scenario['size'] is defined %}
+size={{scenario['size']}}
+{%- else %}
 size={{size}}
+{%- endif%}
 numjobs={{numjob}}
 {%- endfor %}
 {%- endfor %}
@@ -315,7 +350,7 @@ def GetOrGenerateJobFileString(job_file_path, scenario_strings,
       in GB.
     block_size: Quantity or None. If Quantity, the block size to use.
     runtime: int. The number of seconds to run each job.
-    paramters: list. Other fio parameters to apply to all jobs.
+    parameters: list. Other fio parameters to apply to all jobs.
 
   Returns:
     A string containing a fio job file.
@@ -373,8 +408,26 @@ def GetConfig(user_config):
   return config
 
 
-def CheckPrerequisites():
+def GetLogFlags(log_file_base):
+  collect_logs = FLAGS.fio_lat_log or FLAGS.fio_bw_log or FLAGS.fio_iops_log
+  fio_log_flags = [(FLAGS.fio_lat_log, '--write_lat_log=%(filename)s',),
+                   (FLAGS.fio_bw_log, '--write_bw_log=%(filename)s',),
+                   (FLAGS.fio_iops_log, '--write_iops_log=%(filename)s',),
+                   (FLAGS.fio_hist_log, '--write_hist_log=%(filename)s',),
+                   (collect_logs, '--log_avg_msec=%(interval)d',)]
+  fio_command_flags = ' '.join([flag for given, flag in fio_log_flags if given])
+  if FLAGS.fio_hist_log:
+    fio_command_flags = ' '.join([
+        fio_command_flags, '--log_hist_msec=%(hist_interval)d'])
+
+  return fio_command_flags % {'filename': log_file_base,
+                              'interval': FLAGS.fio_log_avg_msec,
+                              'hist_interval': FLAGS.fio_log_hist_msec}
+
+
+def CheckPrerequisites(benchmark_config):
   """Perform flag checks."""
+  del benchmark_config  # unused
   WarnOnBadFlags()
 
 
@@ -438,10 +491,11 @@ def Run(benchmark_spec):
       FLAGS.fio_blocksize,
       FLAGS.fio_runtime,
       FLAGS.fio_parameters)
-  job_file_path = vm_util.PrependTempDir(LOCAL_JOB_FILE_NAME)
+  job_file_path = vm_util.PrependTempDir(vm.name + LOCAL_JOB_FILE_SUFFIX)
   with open(job_file_path, 'w') as job_file:
     job_file.write(job_file_string)
     logging.info('Wrote fio job file at %s', job_file_path)
+    logging.info(job_file_string)
 
   vm.PushFile(job_file_path, REMOTE_JOB_FILE_PATH)
 
@@ -452,13 +506,31 @@ def Run(benchmark_spec):
     fio_command = 'sudo %s --output-format=json --directory=%s %s' % (
         fio.FIO_PATH, mount_point, REMOTE_JOB_FILE_PATH)
 
+  collect_logs = any([FLAGS.fio_lat_log, FLAGS.fio_bw_log, FLAGS.fio_iops_log,
+                      FLAGS.fio_hist_log])
+
+  log_file_base = ''
+  if collect_logs:
+    log_file_base = '%s_%s' % (PKB_FIO_LOG_FILE_NAME, str(time.time()))
+    fio_command = ' '.join([fio_command, GetLogFlags(log_file_base)])
+
   # TODO(user): This only gives results at the end of a job run
   #      so the program pauses here with no feedback to the user.
   #      This is a pretty lousy experience.
   logging.info('FIO Results:')
 
-  stdout, stderr = vm.RobustRemoteCommand(fio_command, should_log=True)
-  samples = fio.ParseResults(job_file_string, json.loads(stdout))
+  stdout, _ = vm.RobustRemoteCommand(fio_command, should_log=True)
+  bin_vals = []
+  if collect_logs:
+    vm.PullFile(vm_util.GetTempDir(), '%s*.log' % log_file_base)
+    if FLAGS.fio_hist_log:
+      num_logs = int(vm.RemoteCommand(
+          'ls %s_clat_hist.*.log | wc -l' % log_file_base)[0])
+      bin_vals += [fio.ComputeHistogramBinVals(
+          vm, '%s_clat_hist.%s.log' % (
+              log_file_base, idx + 1)) for idx in range(num_logs)]
+  samples = fio.ParseResults(job_file_string, json.loads(stdout),
+                             log_file_base=log_file_base, bin_vals=bin_vals)
 
   return samples
 

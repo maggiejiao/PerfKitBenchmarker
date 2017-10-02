@@ -72,7 +72,7 @@ class _MemorySizeParser(flag_util.UnitsParser):
     super(_MemorySizeParser, self).__init__(convertible_to=(units.byte,
                                                             units.percent))
 
-  def Parse(self, inp):
+  def parse(self, inp):
     """Parse the input.
 
     Args:
@@ -85,7 +85,7 @@ class _MemorySizeParser(flag_util.UnitsParser):
       ValueError: If the input cannot be parsed, or if it parses to a value that
           does not meet the requirements described in self.syntactic_help.
     """
-    size = super(_MemorySizeParser, self).Parse(inp)
+    size = super(_MemorySizeParser, self).parse(inp)
     if size.units != units.percent:
       size_byte_count = size.to(units.byte).magnitude
       if size_byte_count != int(size_byte_count):
@@ -205,7 +205,7 @@ def GetConfig(user_config):
   return configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
 
 
-def CheckPrerequisites():
+def CheckPrerequisites(benchmark_config):
   """Performs input verification checks.
 
   Raises:
